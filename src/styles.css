@@ -1,0 +1,179 @@
+@import 'tailwindcss';
+
+/* ── Typefaces ────────────────────────────────────────────────────────────
+   Bundled, never fetched — the app must render identically offline.
+   The split is the system: Instrument Sans for anything a human wrote,
+   Martian Mono for anything a machine measured. You learn to read the mono
+   as "this is a fact about the system". */
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('./assets/fonts/InstrumentSans-latin.woff2') format('woff2');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: 'Martian Mono';
+  src: url('./assets/fonts/MartianMono-latin.woff2') format('woff2');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@theme {
+  --color-ground: #0d1014;
+  --color-panel: #151a1f;
+  --color-rule: #242c35;
+  /* Tuned for a window that stays open all day: nothing here glares. Pure-white
+     ink on near-black measured 15.8:1, which is the main source of eye strain at
+     13px — it sits at 12.6:1 now. Hues are unchanged; only intensity dropped.
+     Every value still clears WCAG AA (4.5:1) on both ground and panel. */
+  --color-ink: #ccd3db;
+  --color-muted: #78848f;
+  --color-accent: #9c8fc0;
+  --color-ok: #62a688;
+  --color-warn: #c09a5f;
+  --color-crit: #c66d60;
+
+  --font-sans: 'Instrument Sans', system-ui, sans-serif;
+  --font-mono: 'Martian Mono', ui-monospace, monospace;
+
+  /* Density: a tool kept open all day, not a page you land on. */
+  --spacing-row: 40px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+:root {
+  --surface-ground: var(--color-ground);
+  --surface-panel: var(--color-panel);
+}
+
+/* Chrome is glass; the tracklist is lightly translucent — enough for colour to
+   bleed through, opaque enough that dense 13px rows stay readable. The tracklist
+   alpha is the one knob that matters; adjust --list-opacity to taste. */
+:root[data-glass='acrylic-chrome'] {
+  --surface-ground: transparent;
+  --surface-panel: color-mix(in srgb, var(--color-panel) 72%, transparent);
+  --list-opacity: 78%;
+}
+:root[data-glass='acrylic-chrome'] .content-surface {
+  background: color-mix(in srgb, var(--color-ground) var(--list-opacity), transparent);
+}
+
+/* Windows 11 Mica tints the whole window subtly from the wallpaper. */
+:root[data-glass='mica'] {
+  --surface-ground: transparent;
+  --surface-panel: color-mix(in srgb, var(--color-panel) 60%, transparent);
+}
+
+/* Glass everywhere, including the track list. */
+:root[data-glass='acrylic-all'] {
+  --surface-ground: transparent;
+  --surface-panel: color-mix(in srgb, var(--color-panel) 55%, transparent);
+}
+
+body {
+  margin: 0;
+  background: var(--surface-ground);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  letter-spacing: -0.005em;
+  user-select: none;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+
+button,
+input[type='text'],
+input[type='search'] {
+  border-radius: 8px;
+}
+
+
+.data {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+.label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-rule);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #333d49;
+}
+
+
+input[type='range'] {
+  appearance: none;
+  height: 3px;
+  cursor: pointer;
+  border-radius: 2px;
+  /* Transport.tsx sets --fill (0-100) as the played fraction; without this the
+     track has no background at all and the control renders invisible. */
+  background: linear-gradient(
+    to right,
+    var(--color-ink) calc(var(--fill, 0) * 1%),
+    var(--color-rule) 0
+  );
+}
+input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--color-ink);
+  margin-top: -4px;
+  transition: background 120ms ease-out;
+}
+
+input[type='range']:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+
+@keyframes value-in {
+  from {
+    opacity: 0.35;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.value-change {
+  animation: value-in 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
