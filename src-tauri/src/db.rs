@@ -25,7 +25,6 @@ pub enum DbError {
 }
 
 const MIGRATIONS: &[&str] = &[
-    // v1 — initial library mirror
     r#"
     CREATE TABLE albums (
         id            TEXT PRIMARY KEY,
@@ -77,9 +76,6 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX idx_songs_name    ON songs(name);
     CREATE INDEX idx_albums_artist ON albums(artist_name);
     "#,
-    // v2 — Apple reports each artwork's true pixel dimensions. Keeping them lets
-    // us request the largest size an image actually has instead of guessing a
-    // number and getting an upscale.
     r#"
     ALTER TABLE songs     ADD COLUMN artwork_width  INTEGER;
     ALTER TABLE songs     ADD COLUMN artwork_height INTEGER;
@@ -88,20 +84,12 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE playlists ADD COLUMN artwork_width  INTEGER;
     ALTER TABLE playlists ADD COLUMN artwork_height INTEGER;
     "#,
-    // v3 — MusicKit's setQueue is all-or-nothing: a single catalog id it cannot
-    // resolve rejects the entire queue, so ten dead tracks made a 304-song
-    // library unplayable. The engine names the offenders when it fails; keeping
-    // them means the next queue is filtered before the request instead of after
-    // a wasted round trip. Measured at ~2.1s per play.
     r#"
     CREATE TABLE unresolvable (
         catalog_id TEXT PRIMARY KEY,
         seen_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     "#,
-    // v4 — lyrics, cached by catalog id. A row with both columns NULL is a
-    // recorded miss: most tracks have no synced lyrics, and re-asking a free
-    // service on every play is both slow and rude.
     r#"
     CREATE TABLE lyrics (
         track_id   TEXT PRIMARY KEY,
@@ -112,7 +100,6 @@ const MIGRATIONS: &[&str] = &[
     "#,
 ];
 
-/// The fields a lyrics lookup matches on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SongLookup {
     pub name: String,
@@ -121,31 +108,24 @@ pub struct SongLookup {
     pub duration_ms: u64,
 }
 
-/// Apple's artwork service tops out here for album art.
 pub const MAX_ARTWORK: u32 = 3000;
 
-/// A template plus the largest size it can actually produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artwork {
     pub template: String,
-    /// `None` when Apple didn't report dimensions.
     pub max_side: Option<u32>,
 }
 
 impl Artwork {
-    /// The biggest sensible request: the image's own maximum, capped at Apple's
-    /// ceiling. Asking beyond the source only yields an upscale.
     pub fn best_size(&self) -> u32 {
         self.max_side.unwrap_or(MAX_ARTWORK).min(MAX_ARTWORK)
     }
 
-    /// Never request more than the image has.
     pub fn clamp(&self, requested: u32) -> u32 {
         requested.min(self.best_size())
     }
 }
 
-/// Anything the UI lists. One shape for songs keeps the IPC surface small.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SongRow {
     pub id: String,
@@ -200,8 +180,6 @@ impl Db {
     }
 
     fn init(conn: Connection) -> Result<Self, DbError> {
-        // WAL keeps background sync writes from blocking UI reads, which is the
-        // whole point of having a local mirror.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -225,8 +203,6 @@ impl Db {
         }
         Ok(())
     }
-
-    // ── writes (sync only) ─────────────────────────────────────────────
 
     pub fn upsert_songs(&mut self, rows: &[SongUpsert]) -> Result<usize, DbError> {
         let tx = self.conn.transaction()?;
@@ -355,8 +331,6 @@ impl Db {
         Ok(rows.len())
     }
 
-    /// Replace a playlist's ordered track list. The songs themselves must be
-    /// upserted first; this only records position → song_id.
     pub fn set_playlist_tracks(&mut self, playlist_id: &str, song_ids: &[String]) -> Result<(), DbError> {
         let tx = self.conn.transaction()?;
         {
@@ -372,7 +346,6 @@ impl Db {
         Ok(())
     }
 
-    /// A playlist's songs in playlist order. Empty until first fetched.
     pub fn playlist_songs(&self, playlist_id: &str) -> Result<Vec<SongRow>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT s.id, s.catalog_id, s.name, s.artist_name, s.album_name, s.duration_ms, s.artwork_url
@@ -403,10 +376,6 @@ impl Db {
             .optional()?)
     }
 
-    // ── reads (UI path — must stay fast) ───────────────────────────────
-
-    /// Remember catalog ids Apple refused to resolve. Idempotent — the engine
-    /// reports the same ids every time it retries.
     pub fn mark_unresolvable(&self, ids: &[String]) -> Result<usize, DbError> {
         let mut stmt =
             self.conn.prepare("INSERT OR IGNORE INTO unresolvable (catalog_id) VALUES (?1)")?;
@@ -417,10 +386,6 @@ impl Db {
         Ok(added)
     }
 
-    /// What we know about a track's lyrics.
-    ///
-    /// `None` means never looked up. `Some((None, None))` is a recorded miss and
-    /// must not trigger another fetch.
     #[allow(clippy::type_complexity)]
     pub fn lyrics(&self, track_id: &str) -> Result<Option<(Option<String>, Option<String>)>, DbError> {
         let row = self
@@ -432,8 +397,6 @@ impl Db {
         Ok(row)
     }
 
-    /// Record a lookup result, hit or miss. Overwrites, so a later hit can
-    /// replace an earlier miss if the source gains the track.
     pub fn save_lyrics(
         &self,
         track_id: &str,
@@ -451,7 +414,6 @@ impl Db {
         Ok(())
     }
 
-    /// The metadata a lyrics lookup needs, by catalog id.
     pub fn song_for_lyrics(&self, catalog_id: &str) -> Result<Option<SongLookup>, DbError> {
         let row = self
             .conn
@@ -472,9 +434,6 @@ impl Db {
         Ok(row)
     }
 
-    /// Any track we can legitimately ask MusicKit to load, for warming the
-    /// licence path at startup. Skips ids already known to be unresolvable —
-    /// warming on one of those would fail and warm nothing.
     pub fn first_playable_catalog_id(&self) -> Result<Option<String>, DbError> {
         let id = self
             .conn
@@ -490,7 +449,6 @@ impl Db {
         Ok(id)
     }
 
-    /// Catalog ids known to be unplayable, for filtering a queue before sending it.
     pub fn unresolvable_ids(&self) -> Result<HashSet<String>, DbError> {
         let mut stmt = self.conn.prepare("SELECT catalog_id FROM unresolvable")?;
         let ids = stmt
@@ -554,9 +512,7 @@ impl Db {
         Ok(rows)
     }
 
-    /// Substring search across title, artist and album.
     pub fn search(&self, query: &str, limit: u32) -> Result<Vec<SongRow>, DbError> {
-        // Escape LIKE wildcards so a literal % or _ in a title doesn't match everything.
         let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let pattern = format!("%{escaped}%");
         let mut stmt = self.conn.prepare(
@@ -585,7 +541,6 @@ impl Db {
         })
     }
 
-    /// Every distinct artwork in the library, with its true maximum size.
     pub fn all_artwork(&self) -> Result<Vec<Artwork>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT artwork_url, MAX(COALESCE(artwork_width, 0), COALESCE(artwork_height, 0))
@@ -609,11 +564,6 @@ impl Db {
         Ok(rows)
     }
 
-    /// Resolve artwork for an arbitrary id, whichever table it's in.
-    ///
-    /// Songs are matched by **either** their library id or their catalog id: the
-    /// now-playing track carries the catalog id (playback needs it), while list
-    /// rows use the library id, and both must resolve to the same cover.
     pub fn artwork_for(&self, id: &str) -> Result<Option<Artwork>, DbError> {
         let row = self
             .conn
@@ -704,7 +654,6 @@ pub struct PlaylistUpsert {
     pub artwork_height: Option<i64>,
 }
 
-/// `%CAPSULE_DB_PATH%` wins, otherwise the platform data dir.
 pub fn default_db_path(app_data: Option<PathBuf>) -> Result<PathBuf, DbError> {
     if let Ok(p) = std::env::var("CAPSULE_DB_PATH") {
         if !p.trim().is_empty() {
@@ -741,7 +690,6 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let v: i64 = db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(v, MIGRATIONS.len() as i64);
-        // Re-running must not error or double-apply.
         let mut db2 = db;
         db2.migrate().unwrap();
         let v2: i64 = db2.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
@@ -756,8 +704,6 @@ mod tests {
         let added = db.mark_unresolvable(&["1683303482".into(), "1800007403".into()]).unwrap();
         assert_eq!(added, 2);
 
-        // The engine reports the same ids on every retry; recording them twice
-        // must not error or double-count.
         let again = db.mark_unresolvable(&["1683303482".into()]).unwrap();
         assert_eq!(again, 0, "already-known id is ignored");
 
@@ -816,7 +762,6 @@ mod tests {
     fn search_escapes_like_wildcards() {
         let mut db = Db::open_in_memory().unwrap();
         db.upsert_songs(&[song("s1", "100% Real", "A"), song("s2", "Other", "B")]).unwrap();
-        // A bare "%" would otherwise match every row.
         assert_eq!(db.search("%", 10).unwrap().len(), 1);
         assert_eq!(db.search("100%", 10).unwrap().len(), 1);
     }
@@ -866,7 +811,6 @@ mod tests {
         let mut db = Db::open_in_memory().unwrap();
         db.upsert_songs(&[song("s1", "a", "A")]).unwrap();
         let art = db.artwork_for("s1").unwrap().unwrap();
-        // Stored as 1200 square, so 3000 must clamp down rather than upscale.
         assert_eq!(art.max_side, Some(1200));
         assert_eq!(art.clamp(3000), 1200);
         assert_eq!(art.clamp(56), 56);
@@ -887,7 +831,6 @@ mod tests {
     #[test]
     fn artwork_templates_are_deduplicated_for_prefetch() {
         let mut db = Db::open_in_memory().unwrap();
-        // Two songs sharing one album cover must warm the cache once, not twice.
         let mut a = song("s1", "a", "A");
         let mut b = song("s2", "b", "A");
         a.artwork_url = Some("https://same/{w}x{h}.jpg".into());
@@ -913,8 +856,6 @@ mod tests {
         assert!(db.all_artwork().unwrap().is_empty());
     }
 
-    /// The real library used during development was 11 songs, so paging and
-    /// search were never exercised at a size where a missing index would show.
     #[test]
     fn queries_stay_fast_with_a_large_library() {
         let mut db = Db::open_in_memory().unwrap();
@@ -936,9 +877,7 @@ mod tests {
         let t = std::time::Instant::now();
         let exact = db.search("Track 04999", 100).unwrap();
         let searched = t.elapsed();
-        // Names are 5-digit: "Track 00000".."Track 49999", so this is one row.
         assert_eq!(exact.len(), 1);
-        // And a shorter prefix must fan out to the whole decade.
         assert_eq!(db.search("Track 0499", 100).unwrap().len(), 10);
 
         let t = std::time::Instant::now();
@@ -946,8 +885,6 @@ mod tests {
         let by_album = t.elapsed();
         assert_eq!(album.len(), 100);
 
-        // Generous bounds — this catches a dropped index or an accidental table
-        // scan, not micro-regressions.
         assert!(paged.as_millis() < 500, "paging took {paged:?}");
         assert!(searched.as_millis() < 2000, "search took {searched:?}");
         assert!(by_album.as_millis() < 500, "album lookup took {by_album:?}");
@@ -957,7 +894,6 @@ mod tests {
     fn playlist_songs_come_back_in_playlist_order() {
         let mut db = Db::open_in_memory().unwrap();
         db.upsert_songs(&[song("a", "A", "x"), song("b", "B", "x"), song("c", "C", "x")]).unwrap();
-        // Deliberately not alphabetical — playlist order must win over any sort.
         db.set_playlist_tracks("p1", &["c".into(), "a".into(), "b".into()]).unwrap();
         let ids: Vec<_> = db.playlist_songs("p1").unwrap().into_iter().map(|s| s.id).collect();
         assert_eq!(ids, vec!["c", "a", "b"]);
@@ -975,8 +911,6 @@ mod tests {
 
     #[test]
     fn playlist_songs_skip_tracks_not_yet_upserted() {
-        // A track referenced by position but never stored as a song is simply
-        // absent (INNER JOIN), not an error.
         let mut db = Db::open_in_memory().unwrap();
         db.upsert_songs(&[song("a", "A", "x")]).unwrap();
         db.set_playlist_tracks("p1", &["a".into(), "missing".into()]).unwrap();
@@ -992,7 +926,6 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(db.counts().unwrap().artists, 2);
-        // Re-upsert same ids must not duplicate.
         db.upsert_artists(&[ArtistUpsert {
             id: "r1".into(),
             name: "Bladee".into(),
