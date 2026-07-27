@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-library-counts"
+description = "Enables the library_counts command without any pre-configured scope."
+commands.allow = ["library_counts"]
+
+[[permission]]
+identifier = "deny-library-counts"
+description = "Denies the library_counts command without any pre-configured scope."
+commands.deny = ["library_counts"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-library-albums"
+description = "Enables the library_albums command without any pre-configured scope."
+commands.allow = ["library_albums"]
+
+[[permission]]
+identifier = "deny-library-albums"
+description = "Denies the library_albums command without any pre-configured scope."
+commands.deny = ["library_albums"]

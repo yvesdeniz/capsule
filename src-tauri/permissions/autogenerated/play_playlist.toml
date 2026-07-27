@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-play-playlist"
+description = "Enables the play_playlist command without any pre-configured scope."
+commands.allow = ["play_playlist"]
+
+[[permission]]
+identifier = "deny-play-playlist"
+description = "Denies the play_playlist command without any pre-configured scope."
+commands.deny = ["play_playlist"]

@@ -1,0 +1,59 @@
+[package]
+name = "capsule"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "A fast Apple Music desktop client"
+license = "MIT"
+default-run = "capsule"
+
+[lib]
+name = "capsule_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+keyring = { version = "3", features = ["windows-native"] }
+souvlaki = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+sha2 = "0.10"
+urlencoding = "2"
+url = "2"
+http = "1"
+window-vibrancy = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+# Frameless chrome needs raw Win32: window subclassing to answer WM_NCHITTEST
+# with HTMAXBUTTON, which is what makes Windows 11 Snap Layouts appear.
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
+  "Win32_System_Com",
+  "Win32_Graphics_Gdi",
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[features]
+# Tauri enables this in dev builds; keeps devtools out of release binaries.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
