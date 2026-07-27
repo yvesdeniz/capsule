@@ -13,7 +13,6 @@ impl Keys {
     pub const LASTFM_SHARED_SECRET: Option<&'static str> = option_env!("LASTFM_SHARED_SECRET");
     pub const DISCORD_CLIENT_ID: Option<&'static str> = option_env!("DISCORD_CLIENT_ID");
 
-    /// Empty strings in a `.env` are treated as absent, which is what users mean.
     fn present(v: Option<&'static str>) -> bool {
         matches!(v, Some(s) if !s.trim().is_empty())
     }
@@ -37,10 +36,8 @@ fn env_flag(name: &str, default: bool) -> bool {
     }
 }
 
-/// Runtime settings, resolved once at startup.
 #[derive(Debug, Clone)]
 pub struct Runtime {
-    /// Un-hide the playback engine webview. Invaluable when debugging auth.
     pub show_engine_window: bool,
 }
 
@@ -50,7 +47,6 @@ impl Runtime {
     }
 }
 
-/// One-line summary for the startup log, so a bug report shows what was on.
 pub fn describe() -> String {
     format!(
         "lastfm={} discord={} show_engine_window={}",
