@@ -7,6 +7,8 @@ your own files. The speed comes from keeping the network off the UI path:
 library metadata is mirrored into local SQLite, artwork is cached on disk, and
 lists are virtualised.
 
+![The capsule library view, playing a track](library.png)
+
 > **Status:** early. The first streaming source works end to end — roughly
 > **0.8s from double-click to audio** on a warm start. The rest are not built
 > yet. Expect rough edges.
@@ -33,6 +35,49 @@ abstraction to be honest rather than shaped around one service.
   runtime will fail with an expired Widevine licence
 - For streaming sources: an **active subscription** to that service — without
   one you get 30-second previews
+
+## Getting started
+
+There is no published build yet, so you compile it yourself. Beyond the
+requirements above you need:
+
+- **Rust 1.82+** — via [rustup](https://rustup.rs)
+- **Bun** — via [bun.sh](https://bun.sh)
+- **MSVC C++ build tools** — Tauri links against them on Windows. Installed with
+  Visual Studio, or standalone with the *Desktop development with C++* workload
+
+```bash
+git clone https://github.com/yvesdeniz/capsule.git
+cd capsule
+bun install
+bun run app
+```
+
+The first compile pulls the whole Rust dependency tree and takes a few minutes.
+Later runs start in seconds. For an installer instead of a dev window:
+
+```bash
+bun run app:build    # NSIS installer under src-tauri/target/release/bundle/
+```
+
+### First run
+
+1. **Sign in.** A window opens on the service's own login page — capsule has no
+   login form and never sees your password. Tokens go to Windows Credential
+   Manager. If you dismiss it, **Open sign-in** brings it back.
+2. **Sync your library.** Press **Sync library** in the sidebar. This mirrors
+   catalog metadata into local SQLite and caches artwork to disk; it is the one
+   slow step, and it is why later startups don't touch the network.
+3. **Play.** Double-click any track. `Ctrl+K` opens the command palette.
+
+A muted track plays automatically at startup — that is deliberate, and the
+reason is under [Honest caveats](#honest-caveats).
+
+Nothing else is required. `config.toml` is written on demand at
+`%APPDATA%\com.deniz.capsule\`, and Last.fm or Discord Rich Presence stay off
+until you supply keys. Those two are read at **compile time**, so copy
+`.env.example` to `.env` and fill it in *before* building — changing them later
+means rebuilding.
 
 ## What it does
 
@@ -130,12 +175,8 @@ stored, tokens in Windows Credential Manager.
 
 ## Development
 
-```bash
-bun install
-bun run app        # tauri dev
-```
-
-Useful while debugging:
+Setup is the same as [Getting started](#getting-started). Useful while
+debugging:
 
 ```bash
 SHOW_ENGINE_WINDOW=true bun run app          # un-hide the playback webview
