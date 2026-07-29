@@ -30,3 +30,4 @@ Thumbs.db
 # working notes stay local — README is the only published document
 *.md
 !/README.md
+docs/images/frame.html
