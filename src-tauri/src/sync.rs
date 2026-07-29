@@ -10,7 +10,6 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::api::Client;
 use crate::db::LibraryCounts;
 use crate::AppState;
 
@@ -64,26 +63,29 @@ pub async fn run(app: AppHandle) {
         return;
     };
 
+    let settings = { state.settings.lock().expect("settings mutex").clone() };
     let tokens = { state.tokens.lock().expect("tokens mutex").clone() };
-    let Some(tokens) = tokens.filter(|t| t.is_complete()) else {
-        tracing::warn!("sync requested with no tokens");
-        let _ = app.emit(
-            "library://failed",
-            SyncFailed { reason: "not signed in".into(), needs_auth: true },
-        );
-        return;
-    };
 
-    let client = match Client::new(tokens) {
+    // Credential precedence lives in one place so sync and startup cannot
+    // disagree about which server they are talking to.
+    let (settings, navidrome_password) = crate::source::resolve(&settings);
+
+    let client = match crate::source::connect(&settings, tokens, navidrome_password) {
         Ok(c) => c,
         Err(e) => {
-            let _ = app.emit(
-                "library://failed",
-                SyncFailed { reason: e.to_string(), needs_auth: false },
-            );
+            let needs_auth = e.needs_auth();
+            tracing::warn!(error = %e, "cannot start sync");
+            let _ =
+                app.emit("library://failed", SyncFailed { reason: e.to_string(), needs_auth });
             return;
         }
     };
+
+    // Artwork fetches need a signed URL, which needs the live client.
+    if let crate::source::SourceClient::Navidrome(ref nd) = client {
+        let shared = std::sync::Arc::new(nd.clone_for_artwork());
+        *app.state::<AppState>().navidrome.lock().expect("navidrome mutex") = Some(shared);
+    }
 
     let songs = AtomicU32::new(0);
     let albums = AtomicU32::new(0);
@@ -156,6 +158,28 @@ pub async fn run(app: AppHandle) {
         return fail(&app, "playlists", e, lease);
     }
 
+    // Apple fills playlist membership as part of its own paging; Subsonic
+    // needs a getPlaylist call per playlist.
+    if let crate::source::SourceClient::Navidrome(ref nd) = client {
+        let ids: Vec<String> = {
+            let state = app.state::<AppState>();
+            let db = state.db.lock().expect("db mutex");
+            db.playlist_ids().unwrap_or_default()
+        };
+        for pid in ids {
+            match nd.playlist_track_ids(&pid).await {
+                Ok(track_ids) => {
+                    let state = app.state::<AppState>();
+                    let mut db = state.db.lock().expect("db mutex");
+                    if let Err(e) = db.set_playlist_tracks(&pid, &track_ids) {
+                        tracing::error!(error = %e, %pid, "playlist track write failed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, %pid, "playlist fetch failed; skipping"),
+            }
+        }
+    }
+
     let artists_res = client
         .library_artists(|rows| {
             if rows.is_empty() {
@@ -193,8 +217,8 @@ pub async fn run(app: AppHandle) {
     tauri::async_runtime::spawn(async move { crate::artwork::prefetch(handle, 56).await });
 }
 
-fn fail(app: &AppHandle, stage: &str, e: crate::api::ApiError, lease: SyncLease) {
-    let needs_auth = matches!(e, crate::api::ApiError::Unauthorized);
+fn fail(app: &AppHandle, stage: &str, e: crate::source::SourceError, lease: SyncLease) {
+    let needs_auth = e.needs_auth();
     tracing::error!(stage, error = %e, "sync stage failed");
     let _ = app.emit("library://failed", SyncFailed { reason: e.to_string(), needs_auth });
     drop(lease);

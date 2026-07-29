@@ -3,11 +3,11 @@ import { useEffect, useState } from 'react'
 import {
   auth,
   library,
+  navidrome as navidromeIpc,
   on,
   settings,
   type AuthStatus,
   type Settings,
-
   type SyncProgress,
 } from '../lib/ipc'
 import { Field, Folders, SOURCES } from './fields'
@@ -24,6 +24,9 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
   const [progress, setProgress] = useState<SyncProgress | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
   const [hasLibrary, setHasLibrary] = useState(false)
+  // Held only until connect succeeds, then it lives in Credential Manager.
+  const [password, setPassword] = useState('')
+  const [connecting, setConnecting] = useState(false)
 
   useEffect(() => {
     void settings.get().then(setDraft)
@@ -61,7 +64,30 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
   const source = draft?.source ?? 'apple'
   const chosen = SOURCES.find((s) => s.id === source)
 
-  // Only Apple Music can actually sync today; the rest stop after setup.
+  /// The connect command pings before it stores anything, so a bad password
+  /// surfaces here rather than as an empty library later. It also persists the
+  /// normalised URL, so the draft is refreshed from disk afterwards to avoid
+  /// a later save writing the raw input back over it.
+  const connectNavidrome = async () => {
+    if (!draft) return
+    setConnecting(true)
+    setProblem(null)
+    try {
+      await navidromeIpc.connect(
+        draft.navidrome.url.trim(),
+        draft.navidrome.username.trim(),
+        password,
+      )
+      setPassword('')
+      setDraft(await settings.get())
+      setStep('sync')
+    } catch (e) {
+      setProblem(typeof e === 'string' ? e : 'Could not connect')
+    } finally {
+      setConnecting(false)
+    }
+  }
+
   const afterSetup = () => {
     save()
     if (source === 'apple') {
@@ -70,7 +96,10 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
         setStep('sync')
         void library.sync()
       } else void auth.showLogin()
+    } else if (source === 'navidrome') {
+      void connectNavidrome()
     } else {
+      // Local and Spotify have no client yet; keep the settings for later.
       setStep('lastfm')
     }
   }
@@ -169,10 +198,23 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                       value={draft.navidrome.username}
                       onChange={(v) => edit({ navidrome: { ...draft.navidrome, username: v } })}
                     />
-                    <p className="text-[11px] text-muted">
-                      Your password is asked for on connect and kept in Windows Credential Manager,
-                      never in the settings file.
+                    <Field
+                      label="Password"
+                      type="password"
+                      value={password}
+                      onChange={setPassword}
+                      onEnter={() => void connectNavidrome()}
+                    />
+                    <p className="text-[11px] leading-5 text-muted">
+                      Checked against your server, then kept in Windows Credential Manager — never
+                      in the settings file.
                     </p>
+                    {draft.navidrome.url.trim().startsWith('http://') && (
+                      <p className="text-[11px] leading-5 text-warn">
+                        This connection is not encrypted. Anyone on the network can read your
+                        login.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -185,10 +227,20 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
 
                 <Next
                   onClick={afterSetup}
+                  disabled={
+                    source === 'navidrome' &&
+                    (connecting ||
+                      draft.navidrome.url.trim() === '' ||
+                      draft.navidrome.username.trim() === '')
+                  }
                   label={
                     source === 'apple' && !authed?.authenticated && !hasLibrary
                       ? 'Open sign-in'
-                      : 'Continue'
+                      : source === 'navidrome'
+                        ? connecting
+                          ? 'Connecting…'
+                          : 'Connect'
+                        : 'Continue'
                   }
                 />
               </>
@@ -326,16 +378,19 @@ function Next({
   onClick,
   label,
   skip,
+  disabled,
 }: {
   onClick: () => void
   label: string
   skip?: () => void
+  disabled?: boolean
 }) {
   return (
     <div className="mt-6 flex items-center gap-3">
       <button
         onClick={onClick}
-        className="rounded border border-accent px-3.5 py-1.5 text-xs text-accent transition-colors hover:bg-accent/10"
+        disabled={disabled}
+        className="rounded border border-accent px-3.5 py-1.5 text-xs text-accent transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
       >
         {label}
       </button>

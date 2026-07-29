@@ -22,17 +22,96 @@ pub fn apply(app: &AppHandle, f: impl FnOnce(&mut Player) -> Vec<EngineCommand>)
     commit(app, &state, cmds);
 }
 
+/// What an [`EngineCommand`] means to the native backend.
+///
+/// The commands are MusicKit-shaped because the webview needs them that way.
+/// Natively most of them collapse: the player has already updated its own
+/// index, so SetQueue, SkipNext and SkipPrevious all mean "load current".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeAction {
+    LoadCurrent,
+    Play,
+    Pause,
+    Seek(u64),
+    Volume(u8),
+    Ignore,
+}
+
+pub fn native_action(cmd: &EngineCommand) -> NativeAction {
+    match cmd {
+        EngineCommand::SetQueue { .. }
+        | EngineCommand::SkipNext
+        | EngineCommand::SkipPrevious => NativeAction::LoadCurrent,
+        EngineCommand::Play => NativeAction::Play,
+        EngineCommand::Pause => NativeAction::Pause,
+        EngineCommand::Seek { ms } => NativeAction::Seek(*ms),
+        EngineCommand::SetVolume { percent } => NativeAction::Volume(*percent),
+        EngineCommand::Prewarm { .. }
+        | EngineCommand::SetShuffle { .. }
+        | EngineCommand::SetRepeat { .. } => NativeAction::Ignore,
+    }
+}
+
 fn commit(app: &AppHandle, state: &AppState, cmds: Vec<EngineCommand>) {
+    let engine = state.audio.lock().expect("audio mutex").clone();
     for c in &cmds {
         tracing::debug!(?c, "engine command");
-        if let Err(e) = engine::send(app, c) {
-            tracing::warn!(?c, error = %e, "failed to send engine command");
+        match &engine {
+            // Native path: the webview is not involved at all.
+            Some(engine) => run_native(app, state, engine, c),
+            None => {
+                if let Err(e) = engine::send(app, c) {
+                    tracing::warn!(?c, error = %e, "failed to send engine command");
+                }
+            }
         }
     }
     publish(app, state);
 }
 
-fn publish(app: &AppHandle, state: &AppState) {
+fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, cmd: &EngineCommand) {
+    match native_action(cmd) {
+        NativeAction::Ignore => {}
+        NativeAction::Play => engine.play(),
+        NativeAction::Pause => engine.pause(),
+        NativeAction::Seek(ms) => engine.seek(ms),
+        NativeAction::Volume(p) => engine.set_volume(p),
+        NativeAction::LoadCurrent => {
+            let track =
+                state.player.lock().expect("player mutex").state().current().cloned();
+            let Some(track) = track else { return };
+
+            let client = state.navidrome.lock().expect("navidrome mutex").clone();
+            let Some(client) = client else {
+                tracing::warn!("native load with no navidrome client");
+                return;
+            };
+
+            let dir = {
+                let data = state.data_dir.lock().expect("data dir mutex").clone();
+                crate::stream::cache_dir(data)
+            };
+            let Some(dir) = dir else { return };
+            crate::stream::prune(&dir, crate::stream::CACHE_CAP_BYTES, None);
+
+            let path = crate::stream::cache_path(&dir, &track.id);
+            let url = client.stream_url(&track.id);
+            if let Err(e) = engine.load(url, path) {
+                tracing::error!(error = %e, track = %track.id, "native load failed");
+                let _ = app.emit("playback://error", e.to_string());
+                return;
+            }
+            engine.play();
+        }
+    }
+}
+
+/// Push the current player state to the UI, the media flyout and the taskbar.
+///
+/// `pub(crate)` because the native position ticker must call it too: updating
+/// the player without publishing leaves the transport frozen at 0:00 while
+/// audio plays.
+pub(crate) fn publish(app: &AppHandle, state: &AppState) {
     let snapshot = state.player.lock().expect("player mutex").state().clone();
     if let Err(e) = app.emit("player://state", &snapshot) {
         tracing::warn!(error = %e, "failed to emit player state");
@@ -362,6 +441,7 @@ pub fn settings_get(state: State<'_, AppState>) -> crate::settings::Settings {
 
 #[tauri::command]
 pub fn settings_set(
+    app: AppHandle,
     state: State<'_, AppState>,
     settings: crate::settings::Settings,
 ) -> Result<(), String> {
@@ -370,8 +450,17 @@ pub fn settings_set(
         return Err("no data directory; settings cannot be saved".into());
     };
 
+    let previous = state.settings.lock().expect("settings mutex").source;
     crate::settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    let source = settings.source;
     *state.settings.lock().expect("settings mutex") = settings;
+
+    // Each source has its own database file. Leaving the old handle open would
+    // show the previous source's library and write the new one's rows into it.
+    if source != previous {
+        use_database_for(&app, source)?;
+        let _ = app.emit("library://updated", sync::counts(&app));
+    }
     Ok(())
 }
 
@@ -440,8 +529,24 @@ pub fn library_sync(app: AppHandle) {
     tauri::async_runtime::spawn(async move { sync::run(app).await });
 }
 
+/// Which id the playback backend addresses a track by.
+///
+/// MusicKit plays from Apple's catalog, so that path needs `catalog_id` and a
+/// track without one is genuinely unplayable. Native sources address tracks by
+/// their own library id — and they never have a catalog id, so filtering on one
+/// would silently discard the entire library.
+fn playable_id(source: crate::settings::Source, s: &SongRow) -> Option<String> {
+    use crate::settings::Source;
+    match source {
+        Source::Apple | Source::Spotify => s.catalog_id.clone(),
+        Source::Navidrome | Source::Local => Some(s.id.clone()),
+    }
+}
+
 fn enqueue(app: &AppHandle, songs: Vec<SongRow>, start_index: usize) -> bool {
     let state = app.state::<AppState>();
+
+    let source = state.settings.lock().expect("settings mutex").source;
 
     let dead = state
         .db
@@ -453,12 +558,12 @@ fn enqueue(app: &AppHandle, songs: Vec<SongRow>, start_index: usize) -> bool {
             HashSet::new()
         });
 
-    let clicked = songs.get(start_index).and_then(|s| s.catalog_id.clone());
+    let clicked = songs.get(start_index).and_then(|s| playable_id(source, s));
 
     let playable: Vec<Track> = songs
         .into_iter()
         .filter_map(|s| {
-            let id = s.catalog_id.clone()?;
+            let id = playable_id(source, &s)?;
             if dead.contains(&id) {
                 return None;
             }
@@ -487,7 +592,7 @@ fn enqueue(app: &AppHandle, songs: Vec<SongRow>, start_index: usize) -> bool {
 #[tauri::command]
 pub fn play_songs(app: AppHandle, songs: Vec<SongRow>, start_index: Option<usize>) {
     if !enqueue(&app, songs, start_index.unwrap_or(0)) {
-        tracing::warn!("play_songs: no rows had a catalog id");
+        tracing::warn!("play_songs: nothing in the selection was playable");
     }
 }
 
@@ -555,10 +660,188 @@ pub async fn play_playlist(app: AppHandle, playlist_id: String) -> Result<(), St
     Ok(())
 }
 
+/// Point the library at the database belonging to `source`.
+///
+/// Each source has its own file, and the handle is opened once at startup from
+/// whatever source was configured then. Switching source at runtime without
+/// this writes the new source's rows into the previous source's database —
+/// which corrupts both and defeats the per-source split entirely.
+fn use_database_for(app: &AppHandle, source: crate::settings::Source) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let dir = state.data_dir.lock().expect("data dir mutex").clone();
+    let path = crate::db::default_db_path(dir, source).map_err(|e| e.to_string())?;
+    let opened = crate::db::Db::open_at(&path).map_err(|e| e.to_string())?;
+    tracing::info!(path = %path.display(), ?source, "switching library database");
+    *state.db.lock().expect("db mutex") = opened;
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavidromeStatus {
+    pub configured: bool,
+    pub url: String,
+    pub username: String,
+    pub insecure: bool,
+}
+
+#[tauri::command]
+pub fn navidrome_status(state: State<'_, AppState>) -> NavidromeStatus {
+    let settings = state.settings.lock().expect("settings mutex").clone();
+    // Either store counts as configured: the env override exists precisely so
+    // a dev machine can skip the connect screen.
+    let has_password = crate::config::navidrome_env().is_some()
+        || auth::load_navidrome().ok().flatten().is_some();
+    NavidromeStatus {
+        insecure: crate::subsonic::is_insecure(&settings.navidrome.url),
+        configured: has_password
+            && !settings.navidrome.url.trim().is_empty()
+            && !settings.navidrome.username.trim().is_empty(),
+        url: settings.navidrome.url,
+        username: settings.navidrome.username,
+    }
+}
+
+/// Verify a Navidrome login, then persist it.
+///
+/// Order matters: ping first, write second. Storing credentials we have not
+/// verified would leave the app in a state where sync fails for a reason the
+/// user has no way to see.
+#[tauri::command]
+pub async fn navidrome_connect(
+    app: AppHandle,
+    url: String,
+    username: String,
+    password: String,
+) -> Result<(), String> {
+    let client = crate::subsonic::Client::new(crate::subsonic::Credentials {
+        base_url: url,
+        username: username.clone(),
+        password: password.clone(),
+    })
+    .map_err(|e| e.to_string())?;
+
+    client.ping().await.map_err(|e| match e {
+        crate::subsonic::SubsonicError::Unauthorized => "wrong username or password".to_string(),
+        crate::subsonic::SubsonicError::Http(_) => "server unreachable".to_string(),
+        other => other.to_string(),
+    })?;
+
+    auth::save_navidrome(&auth::NavidromeCredentials { password }).map_err(|e| e.to_string())?;
+
+    {
+        let state = app.state::<AppState>();
+        let dir = state.data_dir.lock().expect("data dir mutex").clone();
+        let mut settings = state.settings.lock().expect("settings mutex");
+        settings.source = crate::settings::Source::Navidrome;
+        settings.navidrome.url = client.base_url().to_string();
+        settings.navidrome.username = username;
+        match dir {
+            Some(dir) => {
+                if let Err(e) = crate::settings::save(&dir, &settings) {
+                    tracing::error!(error = %e, "failed to persist navidrome settings");
+                }
+            }
+            None => tracing::warn!("no data directory; navidrome settings not persisted"),
+        }
+    }
+
+    // Must happen before the sync: otherwise Navidrome's rows land in whichever
+    // database was open at launch.
+    use_database_for(&app, crate::settings::Source::Navidrome)?;
+    let _ = app.emit("library://updated", sync::counts(&app));
+
+    // Navidrome plays natively. A missing output device is not fatal: the
+    // library still browses, playback just reports unavailable.
+    match crate::audio::Engine::new() {
+        Ok(e) => {
+            *app.state::<AppState>().audio.lock().expect("audio mutex") =
+                Some(std::sync::Arc::new(e));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "no audio output; playback disabled");
+            let _ = app.emit("playback://error", e.to_string());
+        }
+    }
+
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move { sync::run(handle).await });
+    Ok(())
+}
+
 #[tauri::command]
 pub fn dev_load_recent(app: AppHandle) -> Result<(), String> {
     let Some(w) = engine::window(&app) else {
         return Err("engine window not available".into());
     };
     w.eval("window.__saint && __saint.loadRecent()").map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::EngineCommand;
+
+    #[test]
+    fn musickit_only_commands_are_no_ops_natively() {
+        // Rust already applied shuffle and repeat to its own queue; forwarding
+        // them would double-apply. Prewarm has no DRM path to warm.
+        assert_eq!(native_action(&EngineCommand::Prewarm { id: "x".into() }), NativeAction::Ignore);
+        assert_eq!(native_action(&EngineCommand::SetShuffle { on: true }), NativeAction::Ignore);
+        assert_eq!(native_action(&EngineCommand::SetRepeat { mode: 2 }), NativeAction::Ignore);
+    }
+
+    #[test]
+    fn transport_commands_map_directly() {
+        assert_eq!(native_action(&EngineCommand::Play), NativeAction::Play);
+        assert_eq!(native_action(&EngineCommand::Pause), NativeAction::Pause);
+        assert_eq!(native_action(&EngineCommand::Seek { ms: 5000 }), NativeAction::Seek(5000));
+        assert_eq!(
+            native_action(&EngineCommand::SetVolume { percent: 40 }),
+            NativeAction::Volume(40)
+        );
+    }
+
+    fn row(id: &str, catalog: Option<&str>) -> SongRow {
+        SongRow {
+            id: id.into(),
+            catalog_id: catalog.map(|c| c.into()),
+            name: "t".into(),
+            artist_name: "a".into(),
+            album_name: "al".into(),
+            duration_ms: 1000,
+            artwork_url: None,
+        }
+    }
+
+    #[test]
+    fn native_sources_queue_by_library_id_not_catalog_id() {
+        use crate::settings::Source;
+        // Navidrome tracks have no catalog id — that is an Apple concept. If
+        // the queue filters on one, the entire library becomes unplayable and
+        // the transport just says "Nothing queued".
+        let navidrome_track = row("tr-1", None);
+        assert_eq!(playable_id(Source::Navidrome, &navidrome_track).as_deref(), Some("tr-1"));
+        assert_eq!(playable_id(Source::Local, &navidrome_track).as_deref(), Some("tr-1"));
+    }
+
+    #[test]
+    fn apple_queues_by_catalog_id_and_rejects_rows_without_one() {
+        use crate::settings::Source;
+        assert_eq!(
+            playable_id(Source::Apple, &row("lib-1", Some("cat-1"))).as_deref(),
+            Some("cat-1")
+        );
+        assert_eq!(playable_id(Source::Apple, &row("lib-1", None)), None);
+    }
+
+    #[test]
+    fn queue_and_skip_commands_load_the_current_index() {
+        assert_eq!(
+            native_action(&EngineCommand::SetQueue { ids: vec!["a".into()], start_index: 0 }),
+            NativeAction::LoadCurrent
+        );
+        assert_eq!(native_action(&EngineCommand::SkipNext), NativeAction::LoadCurrent);
+        assert_eq!(native_action(&EngineCommand::SkipPrevious), NativeAction::LoadCurrent);
+    }
 }

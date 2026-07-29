@@ -82,6 +82,21 @@ export const auth = {
   showLogin: () => invoke<void>('auth_show_login'),
 }
 
+export interface NavidromeStatus {
+  configured: boolean
+  url: string
+  username: string
+  insecure: boolean
+}
+
+export const navidrome = {
+  status: () => invoke<NavidromeStatus>('navidrome_status'),
+  // The password goes straight to the credential store on the Rust side; it is
+  // never held in frontend state beyond this call.
+  connect: (url: string, username: string, password: string) =>
+    invoke<void>('navidrome_connect', { url, username, password }),
+}
+
 export interface SongRow {
   id: string
   catalog_id: string | null
@@ -159,6 +174,7 @@ type Events = {
   'library://progress': SyncProgress
   'library://updated': LibraryCounts
   'library://failed': SyncFailed
+  'playback://error': string
 }
 
 export function on<K extends keyof Events>(

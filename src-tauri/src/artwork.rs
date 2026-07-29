@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use tauri::{Manager, UriSchemeContext, UriSchemeResponder};
+use tauri::{AppHandle, Manager, UriSchemeContext, UriSchemeResponder};
 
 use crate::AppState;
 
@@ -23,7 +23,23 @@ fn cache_dir(app_data: Option<PathBuf>) -> Option<PathBuf> {
     Some(app_data?.join("artwork"))
 }
 
+/// Navidrome cover references are stored as `subsonic:<coverArtId>` rather than
+/// a URL, because fetching one needs auth and an authenticated URL in SQLite
+/// would break the promise that the database is safe to paste into a bug report.
+pub fn is_subsonic_ref(template: &str) -> bool {
+    template.starts_with(crate::subsonic::ARTWORK_PREFIX)
+}
+
+pub fn subsonic_id(template: &str) -> Option<&str> {
+    template.strip_prefix(crate::subsonic::ARTWORK_PREFIX)
+}
+
 pub fn resolve_template(template: &str, size: u32) -> String {
+    // Subsonic refs are not URLs and must not be mangled into one; the signed
+    // URL is built at fetch time, where credentials are available.
+    if is_subsonic_ref(template) {
+        return template.to_string();
+    }
     if template.contains("{w}") || template.contains("{h}") {
         return template
             .replace("{w}", &size.to_string())
@@ -143,17 +159,37 @@ pub fn cache_path(dir: &Path, template: &str, size: u32) -> PathBuf {
     dir.join(format!("{}-{}.img", cache_key(template), size))
 }
 
+/// The active Navidrome client, when that source is live.
+///
+/// Passed into [`ensure_cached`] rather than read inside it so the fetch path
+/// stays independent of Tauri state and remains testable.
+pub fn signer(app: &AppHandle) -> Option<std::sync::Arc<crate::subsonic::Client>> {
+    app.state::<AppState>().navidrome.lock().expect("navidrome mutex").clone()
+}
+
 pub async fn ensure_cached(
     dir: &Path,
     template: &str,
     size: u32,
+    signer: Option<&crate::subsonic::Client>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    // Keyed on the stored template, never on the signed URL: a fresh salt per
+    // request must not invalidate every cached cover.
     let path = cache_path(dir, template, size);
     if let Ok(bytes) = tokio::fs::read(&path).await {
         return Ok(bytes);
     }
 
-    let url = resolve_template(template, size);
+    let url = match subsonic_id(template) {
+        Some(id) => {
+            let client = signer.ok_or("subsonic artwork requested with no active client")?;
+            client.signed_url(
+                "getCoverArt",
+                &[("id", id.to_string()), ("size", size.to_string())],
+            )
+        }
+        None => resolve_template(template, size),
+    };
     let resp = reqwest::get(&url).await?;
     if !resp.status().is_success() {
         return Err(format!("cdn {}", resp.status()).into());
@@ -185,13 +221,17 @@ pub async fn prefetch(app: tauri::AppHandle, size: u32) {
         }
     };
 
+    // Resolved once: Subsonic covers need a signed URL, and the client is
+    // stable for the life of the prefetch.
+    let nd = signer(&app);
+
     let total = art.len();
     let mut ok = 0usize;
     let mut bytes = 0usize;
     let mut unresizable = 0usize;
     for a in art {
         let want = a.clamp(size);
-        match ensure_cached(&dir, &a.template, want).await {
+        match ensure_cached(&dir, &a.template, want, nd.as_deref()).await {
             Ok(b) => {
                 ok += 1;
                 bytes += b.len();
@@ -241,7 +281,7 @@ async fn serve(
 
     let want = if size == 0 { art.best_size() } else { art.clamp(size) };
     let dir = cache_dir(app.path().app_data_dir().ok()).ok_or("no cache dir")?;
-    let bytes = ensure_cached(&dir, &art.template, want).await?;
+    let bytes = ensure_cached(&dir, &art.template, want, signer(app).as_deref()).await?;
     Ok(ok_response(bytes, content_type(&resolve_template(&art.template, want))))
 }
 
@@ -271,6 +311,35 @@ mod tests {
     fn template_without_any_size_is_left_alone() {
         let t = "https://example.com/cover.png";
         assert_eq!(resolve_template(t, 300), t);
+    }
+
+    #[test]
+    fn subsonic_refs_are_recognised_and_parsed() {
+        assert!(is_subsonic_ref("subsonic:al-1"));
+        assert!(!is_subsonic_ref("https://example.com/{w}x{h}bb.jpg"));
+        assert_eq!(subsonic_id("subsonic:al-1"), Some("al-1"));
+        assert_eq!(subsonic_id("https://example.com/a.jpg"), None);
+    }
+
+    #[test]
+    fn resolve_template_leaves_subsonic_refs_alone() {
+        assert_eq!(resolve_template("subsonic:al-1", 300), "subsonic:al-1");
+    }
+
+    #[test]
+    fn cache_key_is_stable_for_a_subsonic_ref() {
+        let dir = Path::new(r"C:\cache");
+        assert_eq!(cache_path(dir, "subsonic:al-1", 300), cache_path(dir, "subsonic:al-1", 300));
+        assert_ne!(cache_path(dir, "subsonic:al-1", 300), cache_path(dir, "subsonic:al-2", 300));
+    }
+
+    #[tokio::test]
+    async fn subsonic_artwork_without_a_client_errors_rather_than_fetching() {
+        let dir = std::env::temp_dir().join(format!("saint-art-nosign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let res = ensure_cached(&dir, "subsonic:al-1", 56, None).await;
+        assert!(res.is_err(), "must not attempt a fetch with no way to sign it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -383,7 +452,7 @@ mod tests {
         let path = cache_path(&dir, template, 56);
         std::fs::write(&path, b"cached-bytes").unwrap();
 
-        let got = ensure_cached(&dir, template, 56).await.unwrap();
+        let got = ensure_cached(&dir, template, 56, None).await.unwrap();
         assert_eq!(got, b"cached-bytes");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -392,7 +461,7 @@ mod tests {
     #[tokio::test]
     async fn unreachable_host_errors_rather_than_panicking() {
         let dir = std::env::temp_dir().join(format!("saint-art-fail-{}", std::process::id()));
-        let res = ensure_cached(&dir, "https://nonexistent.invalid/{w}x{h}.jpg", 56).await;
+        let res = ensure_cached(&dir, "https://nonexistent.invalid/{w}x{h}.jpg", 56, None).await;
         assert!(res.is_err(), "a dead CDN must surface as an error");
         let _ = std::fs::remove_dir_all(&dir);
     }

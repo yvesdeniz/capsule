@@ -1,7 +1,11 @@
 import { artworkUrl, formatTime, player, type PlayerState } from '../lib/ipc'
 import { Next, Pause, Play, Prev, Repeat, RepeatOne, Shuffle } from './icons'
 
-export function Transport({ state }: { state: PlayerState | null }) {
+export function Transport({
+  state,
+}: {
+  state: PlayerState | null
+}) {
   const track = state && state.index !== null ? state.queue[state.index] : undefined
   const busy = state?.status === 'loading' || state?.status === 'stalled'
   const playing = state?.status === 'playing'

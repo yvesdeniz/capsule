@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { CommandPalette } from './components/CommandPalette'
 import { Lyrics } from './components/Lyrics'
+import { NavidromeConnect } from './components/NavidromeConnect'
 import { Onboarding } from './components/Onboarding'
 import { Readout } from './components/Readout'
 import { SettingsView } from './components/SettingsView'
@@ -13,21 +14,32 @@ import {
   auth,
   formatTime,
   library,
+  navidrome as navidromeIpc,
   on,
   player,
   settings,
   type AlbumRow,
   type AuthStatus,
   type LibraryCounts,
+  type NavidromeStatus,
   type PlayerState,
   type PlaylistRow,
   type SongRow,
+  type Source,
   type SyncProgress,
 } from './lib/ipc'
 
 type View = 'songs' | 'albums' | 'playlists' | 'lyrics' | 'settings'
 
 const ROW = 40
+
+/// Which "your login stopped working" message to show. The Apple wording is
+/// wrong for a Navidrome library, and it appears on two separate events.
+function authMessage(source: Source) {
+  return source === 'navidrome'
+    ? 'Navidrome rejected your login. Reconnect to continue.'
+    : 'Apple Music session expired. Sign in again.'
+}
 
 export default function App() {
   const [view, setView] = useState<View>('songs')
@@ -44,6 +56,13 @@ export default function App() {
   const [results, setResults] = useState<SongRow[] | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [onboarding, setOnboarding] = useState<boolean | null>(null)
+  const [source, setSource] = useState<Source>('apple')
+  const [ndStatus, setNdStatus] = useState<NavidromeStatus | null>(null)
+  // The subscription effect only re-runs on [reload], so its handlers read the
+  // live source through a ref rather than a value captured at subscribe time.
+  const sourceRef = useRef<Source>('apple')
+  sourceRef.current = source
+  const lastListRefresh = useRef(0)
 
   const reload = useCallback(async () => {
     const [s, a, p, c] = await Promise.all([
@@ -62,20 +81,42 @@ export default function App() {
     void reload()
     void player.snapshot().then(setState)
     void auth.status().then(setAuthed)
-    void settings.get().then((s) => setOnboarding(!s.onboarded))
+    void settings.get().then((s) => {
+      setOnboarding(!s.onboarded)
+      setSource(s.source)
+      if (s.source === 'navidrome') void navidromeIpc.status().then(setNdStatus)
+      else setNdStatus(null)
+    })
 
     const subs = [
       on('player://state', setState),
-      on('library://progress', setProgress),
+      on('library://progress', (p) => {
+        setProgress(p)
+        // The list is otherwise only rebuilt on library://updated, which lands
+        // after the whole sync. Navidrome walks one request per album, so that
+        // can be minutes of watching a stale list. Refresh as rows arrive,
+        // throttled so a fast source does not re-query on every batch.
+        const now = Date.now()
+        if (!p.done && now - lastListRefresh.current > 1000) {
+          lastListRefresh.current = now
+          void reload()
+        }
+      }),
       on('library://updated', (c) => {
         setCounts(c)
         void reload()
+        // Connecting from Settings switches the source underneath us and kicks
+        // off a sync. Re-read it here so the status strip and transport stop
+        // describing the source we are no longer on.
+        void settings.get().then((s) => {
+          setSource(s.source)
+          if (s.source === 'navidrome') void navidromeIpc.status().then(setNdStatus)
+          else setNdStatus(null)
+        })
       }),
       on('library://failed', (f) => {
         setProgress(null)
-        setProblem(
-          f.needsAuth ? 'Apple Music session expired. Sign in again.' : `Sync failed: ${f.reason}`,
-        )
+        setProblem(f.needsAuth ? authMessage(sourceRef.current) : `Sync failed: ${f.reason}`)
       }),
       on('auth://authenticated', () => {
         setProblem(null)
@@ -84,7 +125,7 @@ export default function App() {
       on('auth://login-required', () =>
         setProblem('Sign in to Apple Music in the window that just opened.'),
       ),
-      on('auth://lost', () => setProblem('Apple Music session expired. Sign in again.')),
+      on('auth://lost', () => setProblem(authMessage(sourceRef.current))),
       on('engine://ready', () => {
         setEngineOk(true)
         setProblem(null)
@@ -93,6 +134,7 @@ export default function App() {
         setEngineOk(false)
         setProblem(`Playback engine unavailable (${reason}). Apple may have changed their player.`)
       }),
+      on('playback://error', (reason) => setProblem(`Playback failed: ${reason}`)),
     ]
     return () => {
       for (const s of subs) void s.then((un) => un())
@@ -124,12 +166,39 @@ export default function App() {
   }, [query])
 
   const shown: SongRow[] = useMemo(() => results ?? songs, [results, songs])
+
+  // Apple and Spotify play from their catalog, so a row without a catalog id
+  // genuinely cannot be played. Native sources address tracks by their own
+  // library id and never have a catalog id — judging them by one greys out the
+  // entire library and swallows the double-click before it reaches Rust.
+  const canPlay = useCallback(
+    (s: SongRow) =>
+      source === 'navidrome' || source === 'local' ? true : s.catalog_id !== null,
+    [source],
+  )
   const empty = counts !== null && counts.songs === 0 && counts.albums === 0
 
   if (onboarding) {
     return (
       <div className="relative h-full">
         <Onboarding onFinished={() => setOnboarding(false)} />
+      </div>
+    )
+  }
+
+  // Navidrome selected but never verified: the library would just be empty
+  // with no explanation, so ask for the password instead.
+  if (source === 'navidrome' && ndStatus && !ndStatus.configured) {
+    return (
+      <div className="relative h-full">
+        <NavidromeConnect
+          initialUrl={ndStatus.url}
+          initialUsername={ndStatus.username}
+          onConnected={() => {
+            void navidromeIpc.status().then(setNdStatus)
+            void reload()
+          }}
+        />
       </div>
     )
   }
@@ -224,7 +293,12 @@ export default function App() {
                 rowHeight={ROW}
                 empty={<span className="text-muted">No matches</span>}
                 render={(s, i) => (
-                  <SongLine song={s} index={i} onPlay={() => void library.play(shown, i)} />
+                  <SongLine
+                    song={s}
+                    index={i}
+                    playable={canPlay(s)}
+                    onPlay={() => void library.play(shown, i)}
+                  />
                 )}
               />
             ) : view === 'albums' ? (
@@ -270,6 +344,7 @@ export default function App() {
         onNavigate={setView}
         albums={albums}
         playlists={playlists}
+        canPlay={canPlay}
       />
 
       <Transport state={state} />
@@ -287,20 +362,21 @@ export default function App() {
 function SongLine({
   song,
   index,
+  playable,
   onPlay,
 }: {
   song: SongRow
   index: number
+  playable: boolean
   onPlay: () => void
 }) {
-  const playable = song.catalog_id !== null
   return (
     <div
       onDoubleClick={playable ? onPlay : undefined}
       className={`grid h-10 grid-cols-[28px_36px_1fr_1fr_52px] items-center gap-3 border-b border-rule/60 px-4 ${
         playable ? 'hover:bg-accent/6' : 'opacity-45'
       }`}
-      title={playable ? 'Double-click to play' : 'No catalog id — not playable'}
+      title={playable ? 'Double-click to play' : 'Not playable from this source'}
     >
       <span className="data text-[10px] text-muted">
         {String(index + 1).padStart(2, '0')}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-navidrome-connect"
+description = "Enables the navidrome_connect command without any pre-configured scope."
+commands.allow = ["navidrome_connect"]
+
+[[permission]]
+identifier = "deny-navidrome-connect"
+description = "Denies the navidrome_connect command without any pre-configured scope."
+commands.deny = ["navidrome_connect"]

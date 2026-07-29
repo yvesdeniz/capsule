@@ -24,6 +24,8 @@ fn main() {
                 "player_cycle_repeat",
                 "auth_status",
                 "auth_show_login",
+                "navidrome_connect",
+                "navidrome_status",
                 "dev_load_recent",
                 "library_songs",
                 "library_albums",

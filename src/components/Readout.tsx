@@ -21,6 +21,8 @@ export function Readout({
 
   return (
     <div className="label flex flex-wrap items-center justify-center gap-x-5 gap-y-1 border-t border-rule px-4 py-2 [background:var(--surface-panel)]">
+      {/* These three describe the Apple playback path specifically; making
+          them source-aware is still outstanding. */}
       <span className="flex items-center gap-1.5">
         <span
           className="inline-block size-1.5"

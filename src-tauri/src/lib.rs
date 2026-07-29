@@ -6,6 +6,7 @@
 //! disagreeing with each other.
 
 pub mod api;
+pub mod audio;
 pub mod artwork;
 pub mod auth;
 pub mod commands;
@@ -15,6 +16,9 @@ pub mod engine;
 pub mod lyrics;
 pub mod player;
 pub mod settings;
+pub mod source;
+pub mod stream;
+pub mod subsonic;
 #[cfg(target_os = "windows")]
 pub mod smtc;
 #[cfg(target_os = "windows")]
@@ -36,6 +40,12 @@ pub struct AppState {
     pub db: Mutex<db::Db>,
     pub settings: Mutex<settings::Settings>,
     pub data_dir: Mutex<Option<std::path::PathBuf>>,
+    /// The live Navidrome client, when that source is active. Artwork fetches
+    /// need it to sign cover URLs, which cannot be stored in the database.
+    pub navidrome: Mutex<Option<std::sync::Arc<subsonic::Client>>>,
+    /// The native playback engine, present when the active source plays in
+    /// Rust. `None` on the Apple path, or when no output device exists.
+    pub audio: Mutex<Option<std::sync::Arc<audio::Engine>>>,
     pub sync: sync::SyncGuard,
     pub login_prompted: AtomicBool,
     pub engine_ready: AtomicBool,
@@ -51,6 +61,8 @@ impl AppState {
             db: Mutex::new(db),
             settings: Mutex::new(settings::Settings::default()),
             data_dir: Mutex::new(None),
+            navidrome: Mutex::new(None),
+            audio: Mutex::new(None),
             sync: sync::SyncGuard::default(),
             login_prompted: AtomicBool::new(false),
             engine_ready: AtomicBool::new(false),
@@ -145,6 +157,8 @@ pub fn run() {
             commands::player_cycle_repeat,
             commands::auth_status,
             commands::auth_show_login,
+            commands::navidrome_connect,
+            commands::navidrome_status,
             commands::dev_load_recent,
             commands::engine_ready,
             commands::engine_tokens,
@@ -167,7 +181,22 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            let db_path = db::default_db_path(app.path().app_data_dir().ok())?;
+            let data_dir = app.path().app_data_dir().ok();
+
+            // Settings must load before the library: each source keeps its own
+            // database file, so `source` decides which one we open.
+            let loaded = data_dir.as_ref().map(|d| settings::load(d)).unwrap_or_default();
+
+            if let Some(dir) = data_dir.as_ref() {
+                // Installs from before per-source files carry library.sqlite3;
+                // claim it for Apple rather than orphaning it. Failing here
+                // must not stop the app starting.
+                if let Err(e) = db::migrate_legacy_db(dir) {
+                    tracing::warn!(error = %e, "legacy db migration failed; continuing");
+                }
+            }
+
+            let db_path = db::default_db_path(data_dir.clone(), loaded.source)?;
             tracing::info!(path = %db_path.display(), "opening library");
             let database = db::Db::open_at(&db_path)?;
             match database.counts() {
@@ -181,15 +210,35 @@ pub fn run() {
             }
             app.manage(AppState::new(database));
 
-            if let Ok(dir) = app.path().app_data_dir() {
-                let loaded = settings::load(&dir);
-                tracing::info!(
-                    source = ?loaded.source,
-                    onboarded = loaded.onboarded,
-                    lastfm = loaded.lastfm_enabled(),
-                    discord = loaded.discord_enabled(),
-                    "settings"
-                );
+            if loaded.source == settings::Source::Navidrome {
+                // Both of these must exist before the first double-click.
+                // Creating them only during a sync leaves a freshly-launched
+                // app silently unable to play or to fetch new artwork.
+                if let Some(client) = source::navidrome_client(&loaded) {
+                    *app.state::<AppState>().navidrome.lock().expect("navidrome mutex") =
+                        Some(std::sync::Arc::new(client));
+                } else {
+                    tracing::warn!("navidrome source with no usable credential");
+                }
+                match audio::Engine::new() {
+                    Ok(e) => {
+                        *app.state::<AppState>().audio.lock().expect("audio mutex") =
+                            Some(std::sync::Arc::new(e));
+                    }
+                    // Not fatal: the library still browses without a device.
+                    Err(e) => tracing::error!(error = %e, "no audio output; playback disabled"),
+                }
+            }
+            audio::start_ticker(handle.clone());
+
+            tracing::info!(
+                source = ?loaded.source,
+                onboarded = loaded.onboarded,
+                lastfm = loaded.lastfm_enabled(),
+                discord = loaded.discord_enabled(),
+                "settings"
+            );
+            if let Some(dir) = data_dir {
                 let state = app.state::<AppState>();
                 *state.settings.lock().expect("settings mutex") = loaded;
                 *state.data_dir.lock().expect("data dir mutex") = Some(dir);

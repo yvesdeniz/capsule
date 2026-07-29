@@ -21,7 +21,7 @@ One source is active at a time, chosen in `config.toml`.
 |---|---|---|
 | **Apple Music** | working | Needs a subscription; 256kbps AAC, no lossless |
 | **Local files** | planned | FLAC/ALAC via `symphonia` — no webview, and the only path to real lossless |
-| **Navidrome** | planned | Subsonic API; plain HTTP, no DRM |
+| **Navidrome** | working | Subsonic API; plain HTTP, no DRM, decodes in Rust with no webview |
 | **Spotify** | planned | Requires Premium and their Web Playback SDK, with the same DRM constraints as Apple |
 
 Local files are next, because they share nothing with a streaming source — no
@@ -129,6 +129,10 @@ than refusing to start.
 ```toml
 source = "apple"     # apple | local | navidrome | spotify
 
+[navidrome]
+url = ""             # https://music.example.com
+username = ""        # the password lives in Credential Manager, not here
+
 [lyrics]
 offset_ms = 0        # timing calibration, set from the lyrics view
 
@@ -169,9 +173,16 @@ only reaches back to where you started, since the queue is built forward from
 your click. And tracks the catalog can't resolve are skipped silently, because
 the SDK rejects an entire queue if any single track fails.
 
-**Your credentials never touch this app.** Sign-in happens on the service's own
+**Your Apple credentials never touch this app.** Sign-in happens on Apple's own
 login page inside the engine window. No login form here, no password seen or
 stored, tokens in Windows Credential Manager.
+
+**Navidrome is different, and cannot be otherwise.** Subsonic authenticates
+every request with `md5(password + salt)`, so the app has to hold your actual
+password rather than a token derived from it. It goes to Windows Credential
+Manager and never to `config.toml` — but it is a real password at rest, and
+over plain `http://` the derived token can be replayed by anyone on the
+network. The connect screen says so when your URL is not HTTPS.
 
 ## Development
 

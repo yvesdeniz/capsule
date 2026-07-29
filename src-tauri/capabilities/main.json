@@ -23,6 +23,8 @@
     "allow-player-cycle-repeat",
     "allow-auth-status",
     "allow-auth-show-login",
+    "allow-navidrome-connect",
+    "allow-navidrome-status",
     "allow-dev-load-recent",
     "allow-library-songs",
     "allow-library-albums",

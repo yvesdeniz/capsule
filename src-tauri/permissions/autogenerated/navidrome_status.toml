@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-navidrome-status"
+description = "Enables the navidrome_status command without any pre-configured scope."
+commands.allow = ["navidrome_status"]
+
+[[permission]]
+identifier = "deny-navidrome-status"
+description = "Denies the navidrome_status command without any pre-configured scope."
+commands.deny = ["navidrome_status"]

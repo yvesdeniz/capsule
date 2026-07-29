@@ -331,6 +331,14 @@ impl Db {
         Ok(rows.len())
     }
 
+    /// Every playlist id currently mirrored. Sources that fill playlist
+    /// membership in a second pass need this to know what to ask for.
+    pub fn playlist_ids(&self) -> Result<Vec<String>, DbError> {
+        let mut stmt = self.conn.prepare("SELECT id FROM playlists")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
     pub fn set_playlist_tracks(&mut self, playlist_id: &str, song_ids: &[String]) -> Result<(), DbError> {
         let tx = self.conn.transaction()?;
         {
@@ -654,18 +662,63 @@ pub struct PlaylistUpsert {
     pub artwork_height: Option<i64>,
 }
 
-pub fn default_db_path(app_data: Option<PathBuf>) -> Result<PathBuf, DbError> {
+pub fn default_db_path(
+    app_data: Option<PathBuf>,
+    source: crate::settings::Source,
+) -> Result<PathBuf, DbError> {
     if let Ok(p) = std::env::var("CAPSULE_DB_PATH") {
         if !p.trim().is_empty() {
             return Ok(PathBuf::from(p));
         }
     }
-    Ok(app_data.ok_or(DbError::NoDataDir)?.join("library.sqlite3"))
+    let file = match source {
+        crate::settings::Source::Apple => "library-apple.sqlite3",
+        crate::settings::Source::Navidrome => "library-navidrome.sqlite3",
+        crate::settings::Source::Spotify => "library-spotify.sqlite3",
+        crate::settings::Source::Local => "library-local.sqlite3",
+    };
+    Ok(app_data.ok_or(DbError::NoDataDir)?.join(file))
+}
+
+/// One-time move of the pre-multi-source database.
+///
+/// Installs from before per-source files have `library.sqlite3`. Leaving it
+/// behind would silently orphan the library and trigger a full re-sync, so it
+/// is claimed for Apple, which is the only source that could have written it.
+/// Never overwrites an existing target.
+///
+/// The `-wal` and `-shm` sidecars move with it. SQLite derives their names from
+/// the database filename, so renaming the main file alone strands the write-ahead
+/// log — and in WAL mode that log holds committed transactions that have not yet
+/// been checkpointed. Losing it loses data.
+pub fn migrate_legacy_db(dir: &Path) -> std::io::Result<()> {
+    let legacy = dir.join("library.sqlite3");
+    let target = dir.join("library-apple.sqlite3");
+    if !legacy.exists() || target.exists() {
+        return Ok(());
+    }
+
+    tracing::info!("migrating legacy library.sqlite3 to library-apple.sqlite3");
+    std::fs::rename(&legacy, &target)?;
+
+    // Sidecars are best-effort: a clean shutdown leaves none, and failing the
+    // whole migration because one is missing would be worse than continuing.
+    for suffix in ["-wal", "-shm"] {
+        let from = dir.join(format!("library.sqlite3{suffix}"));
+        let to = dir.join(format!("library-apple.sqlite3{suffix}"));
+        if from.exists() && !to.exists() {
+            if let Err(e) = std::fs::rename(&from, &to) {
+                tracing::warn!(error = %e, suffix, "could not move sqlite sidecar");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Source;
 
     fn song(id: &str, name: &str, artist: &str) -> SongUpsert {
         SongUpsert {
@@ -935,11 +988,88 @@ mod tests {
         assert_eq!(db.counts().unwrap().artists, 2);
     }
 
+    /// One test, not two: `CAPSULE_DB_PATH` is process-wide, and cargo runs
+    /// tests in parallel — a separate override test races this one and makes
+    /// both flaky.
     #[test]
-    fn env_override_wins_for_db_path() {
-        std::env::set_var("CAPSULE_DB_PATH", r"C:\tmp\custom.sqlite3");
-        let p = default_db_path(Some(PathBuf::from(r"C:\appdata"))).unwrap();
+    fn db_path_is_per_source_unless_overridden() {
+        let data = Some(PathBuf::from(r"C:\appdata"));
         std::env::remove_var("CAPSULE_DB_PATH");
-        assert_eq!(p, PathBuf::from(r"C:\tmp\custom.sqlite3"));
+
+        let apple = default_db_path(data.clone(), Source::Apple).unwrap();
+        let navi = default_db_path(data.clone(), Source::Navidrome).unwrap();
+        assert_eq!(apple, PathBuf::from(r"C:\appdata\library-apple.sqlite3"));
+        assert_eq!(navi, PathBuf::from(r"C:\appdata\library-navidrome.sqlite3"));
+        assert_ne!(apple, navi);
+
+        // The override is deliberately source-blind: it names one exact file.
+        std::env::set_var("CAPSULE_DB_PATH", r"C:\tmp\custom.sqlite3");
+        let overridden = default_db_path(data, Source::Apple).unwrap();
+        std::env::remove_var("CAPSULE_DB_PATH");
+        assert_eq!(overridden, PathBuf::from(r"C:\tmp\custom.sqlite3"));
+    }
+
+    #[test]
+    fn legacy_db_is_renamed_to_apple_once() {
+        let dir = std::env::temp_dir().join(format!("capsule-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("library.sqlite3"), b"legacy").unwrap();
+
+        migrate_legacy_db(&dir).unwrap();
+
+        assert!(!dir.join("library.sqlite3").exists());
+        assert_eq!(std::fs::read(dir.join("library-apple.sqlite3")).unwrap(), b"legacy");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_takes_the_wal_and_shm_with_it() {
+        // SQLite derives sidecar names from the database filename. Renaming the
+        // main file alone strands the write-ahead log, and in WAL mode that log
+        // holds committed-but-uncheckpointed transactions — losing it loses data.
+        let dir = std::env::temp_dir().join(format!("capsule-legacy-wal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("library.sqlite3"), b"db").unwrap();
+        std::fs::write(dir.join("library.sqlite3-wal"), b"wal").unwrap();
+        std::fs::write(dir.join("library.sqlite3-shm"), b"shm").unwrap();
+
+        migrate_legacy_db(&dir).unwrap();
+
+        assert_eq!(std::fs::read(dir.join("library-apple.sqlite3-wal")).unwrap(), b"wal");
+        assert_eq!(std::fs::read(dir.join("library-apple.sqlite3-shm")).unwrap(), b"shm");
+        assert!(!dir.join("library.sqlite3-wal").exists(), "no orphaned wal left behind");
+        assert!(!dir.join("library.sqlite3-shm").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_without_sidecars_is_fine() {
+        // A cleanly-closed database has no wal or shm; their absence must not
+        // fail the migration.
+        let dir = std::env::temp_dir().join(format!("capsule-legacy-nowal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("library.sqlite3"), b"db").unwrap();
+
+        migrate_legacy_db(&dir).unwrap();
+
+        assert_eq!(std::fs::read(dir.join("library-apple.sqlite3")).unwrap(), b"db");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_does_not_clobber_an_existing_apple_db() {
+        let dir = std::env::temp_dir().join(format!("capsule-legacy2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("library.sqlite3"), b"legacy").unwrap();
+        std::fs::write(dir.join("library-apple.sqlite3"), b"current").unwrap();
+
+        migrate_legacy_db(&dir).unwrap();
+
+        assert_eq!(std::fs::read(dir.join("library-apple.sqlite3")).unwrap(), b"current");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

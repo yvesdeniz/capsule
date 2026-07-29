@@ -20,12 +20,15 @@ export function CommandPalette({
   onNavigate,
   albums,
   playlists,
+  canPlay,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   onNavigate: (view: Nav) => void
   albums: AlbumRow[]
   playlists: PlaylistRow[]
+  /// Source-aware: native sources have no catalog id and must not be judged by one.
+  canPlay: (song: SongRow) => boolean
 }) {
   const [query, setQuery] = useState('')
   const [songs, setSongs] = useState<SongRow[]>([])
@@ -96,7 +99,7 @@ export function CommandPalette({
                 <Item
                   key={`song-${s.id}`}
                   value={`song-${s.id}`}
-                  disabled={!s.catalog_id}
+                  disabled={!canPlay(s)}
                   onSelect={() => run(() => void library.play([s], 0))}
                 >
                   <img

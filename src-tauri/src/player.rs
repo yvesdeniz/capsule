@@ -283,6 +283,15 @@ impl Player {
         }
     }
 
+    /// Report playback state from a backend that is not MusicKit.
+    ///
+    /// [`Self::on_playback_state`] speaks MusicKit's integer codes, which a
+    /// native engine has no business pretending to emit. Without this the
+    /// status never leaves `Loading` and the transport looks stuck.
+    pub fn set_status(&mut self, status: Status) {
+        self.state.status = status;
+    }
+
     pub fn on_position(&mut self, ms: u64) {
         self.state.position_ms = ms;
     }
