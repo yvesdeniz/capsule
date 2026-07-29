@@ -223,6 +223,6 @@ is denied at runtime with `not allowed. Command not found`:
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+GPL. See [LICENSE](LICENSE).
 
 Not affiliated with or endorsed by Apple. Apple Music is a trademark of Apple Inc.
