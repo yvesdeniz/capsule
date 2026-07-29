@@ -10,6 +10,7 @@
     "core:window:allow-close",
     "core:window:allow-is-maximized",
     "core:window:allow-start-resize-dragging",
+    "dialog:allow-open",
     "allow-player-snapshot",
     "allow-player-play",
     "allow-player-pause",

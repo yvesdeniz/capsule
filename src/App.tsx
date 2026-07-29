@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { CommandPalette } from './components/CommandPalette'
 import { Lyrics } from './components/Lyrics'
+import { Onboarding } from './components/Onboarding'
 import { Readout } from './components/Readout'
+import { SettingsView } from './components/SettingsView'
 import { Transport } from './components/Transport'
 import { VirtualList } from './components/VirtualList'
 import { WindowControls } from './components/WindowControls'
@@ -13,6 +15,7 @@ import {
   library,
   on,
   player,
+  settings,
   type AlbumRow,
   type AuthStatus,
   type LibraryCounts,
@@ -22,7 +25,7 @@ import {
   type SyncProgress,
 } from './lib/ipc'
 
-type View = 'songs' | 'albums' | 'playlists' | 'lyrics'
+type View = 'songs' | 'albums' | 'playlists' | 'lyrics' | 'settings'
 
 const ROW = 40
 
@@ -40,6 +43,7 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SongRow[] | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [onboarding, setOnboarding] = useState<boolean | null>(null)
 
   const reload = useCallback(async () => {
     const [s, a, p, c] = await Promise.all([
@@ -58,6 +62,7 @@ export default function App() {
     void reload()
     void player.snapshot().then(setState)
     void auth.status().then(setAuthed)
+    void settings.get().then((s) => setOnboarding(!s.onboarded))
 
     const subs = [
       on('player://state', setState),
@@ -121,6 +126,14 @@ export default function App() {
   const shown: SongRow[] = useMemo(() => results ?? songs, [results, songs])
   const empty = counts !== null && counts.songs === 0 && counts.albums === 0
 
+  if (onboarding) {
+    return (
+      <div className="relative h-full">
+        <Onboarding onFinished={() => setOnboarding(false)} />
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-full flex-col">
       <header
@@ -169,6 +182,9 @@ export default function App() {
           <Tab on={view === 'lyrics' && !results} onClick={() => setView('lyrics')}>
             Lyrics
           </Tab>
+          <Tab on={view === 'settings' && !results} onClick={() => setView('settings')}>
+            Settings
+          </Tab>
 
           <div className="mt-auto px-3">
             <button
@@ -196,7 +212,9 @@ export default function App() {
           )}
 
           <div className="content-surface relative min-h-0 flex-1 overflow-hidden">
-            {view === 'lyrics' && !results ? (
+            {view === 'settings' && !results ? (
+              <SettingsView />
+            ) : view === 'lyrics' && !results ? (
               <Lyrics state={state} />
             ) : empty && !progress ? (
               <Empty onSync={() => void library.sync()} />

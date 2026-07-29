@@ -61,11 +61,27 @@ pub struct Discord {
     pub client_id: String,
 }
 
+/// Window material. Kept as a string rather than an enum so an unrecognised
+/// value degrades to "no glass" instead of invalidating the whole file — a
+/// typo here should not cost the user their settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    pub glass: String,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self { glass: "none".into() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub source: Source,
     pub onboarded: bool,
+    pub appearance: Appearance,
     pub navidrome: Navidrome,
     pub local: Local,
     pub lyrics: LyricsSettings,
