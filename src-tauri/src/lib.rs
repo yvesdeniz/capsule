@@ -130,6 +130,7 @@ pub fn run() {
     tracing::info!("capsule starting ({})", config::describe());
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol(artwork::SCHEME, artwork::handle)
         .invoke_handler(tauri::generate_handler![
             commands::player_snapshot,
@@ -203,7 +204,12 @@ pub fn run() {
                 Err(e) => tracing::warn!(error = %e, "could not read credential store"),
             }
 
-            let glass = std::env::var("CAPSULE_GLASS").unwrap_or_else(|_| "none".into());
+            // The env var is a one-off override for comparing materials; the
+            // setting is what persists, so `bun run app` looks the way the user
+            // last chose rather than depending on how it was launched.
+            let glass = std::env::var("CAPSULE_GLASS").unwrap_or_else(|_| {
+                app.state::<AppState>().settings.lock().expect("settings mutex").appearance.glass.clone()
+            });
             let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("capsule")
                 .inner_size(1160.0, 760.0)

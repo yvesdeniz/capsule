@@ -23,6 +23,7 @@ export type Source = 'apple' | 'spotify' | 'navidrome' | 'local'
 export interface Settings {
   source: Source
   onboarded: boolean
+  appearance: { glass: string }
   navidrome: { url: string; username: string }
   local: { folders: string[] }
   lyrics: { offset_ms: number }
