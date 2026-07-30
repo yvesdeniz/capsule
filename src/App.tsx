@@ -31,6 +31,13 @@ import {
 
 type View = 'songs' | 'albums' | 'playlists' | 'lyrics' | 'settings'
 
+type Detail = {
+  kind: 'album' | 'playlist'
+  id: string
+  title: string
+  subtitle?: string
+}
+
 const ROW = 40
 
 /// Which "your login stopped working" message to show. The Apple wording is
@@ -58,16 +65,16 @@ export default function App() {
   const [onboarding, setOnboarding] = useState<boolean | null>(null)
   const [source, setSource] = useState<Source>('apple')
   const [ndStatus, setNdStatus] = useState<NavidromeStatus | null>(null)
+  // The album or playlist currently opened.
+  const [detail, setDetail] = useState<Detail | null>(null)
   // The subscription effect only re-runs on [reload], so its handlers read the
   // live source through a ref rather than a value captured at subscribe time.
   const sourceRef = useRef<Source>('apple')
   sourceRef.current = source
   const lastListRefresh = useRef(0)
 
-  // Everything below belongs to one source. Carrying it across a switch left
-  // search results pointing at a database Rust had closed, an Apple-worded
-  // error banner over a Navidrome library, and stale sync progress hiding the
-  // empty-library screen.
+  // All of this belongs to one source; carrying it across a switch leaves the
+  // UI describing a library Rust has already closed.
   const applySource = useCallback((next: Source) => {
     setSource((prev) => {
       if (prev !== next) {
@@ -75,6 +82,7 @@ export default function App() {
         setResults(null)
         setProblem(null)
         setProgress(null)
+        setDetail(null)
       }
       return next
     })
@@ -108,9 +116,8 @@ export default function App() {
       on('player://state', setState),
       on('library://progress', (p) => {
         setProgress(p)
-        // The list is otherwise only rebuilt on library://updated, which lands
-        // after the whole sync. Navidrome walks one request per album, so that
-        // can be minutes of watching a stale list. Refresh as rows arrive,
+        // library://updated only lands when the whole sync finishes, which for
+        // Navidrome is one request per album. Refresh as rows arrive instead,
         // throttled so a fast source does not re-query on every batch.
         const now = Date.now()
         if (!p.done && now - lastListRefresh.current > 1000) {
@@ -264,10 +271,22 @@ export default function App() {
           <Tab on={view === 'songs' && !results} onClick={() => setView('songs')}>
             Songs {counts ? <Count n={counts.songs} /> : null}
           </Tab>
-          <Tab on={view === 'albums' && !results} onClick={() => setView('albums')}>
+          <Tab
+            on={view === 'albums' && !results}
+            onClick={() => {
+              setDetail(null)
+              setView('albums')
+            }}
+          >
             Albums {counts ? <Count n={counts.albums} /> : null}
           </Tab>
-          <Tab on={view === 'playlists' && !results} onClick={() => setView('playlists')}>
+          <Tab
+            on={view === 'playlists' && !results}
+            onClick={() => {
+              setDetail(null)
+              setView('playlists')
+            }}
+          >
             Playlists {counts ? <Count n={counts.playlists} /> : null}
           </Tab>
 
@@ -329,6 +348,15 @@ export default function App() {
                   />
                 )}
               />
+            ) : detail ? (
+              <DetailView
+                detail={detail}
+                canPlay={canPlay}
+                nowPlayingId={nowPlayingId}
+                trackIdOf={trackIdOf}
+                onBack={() => setDetail(null)}
+                onProblem={setProblem}
+              />
             ) : view === 'albums' ? (
               <VirtualList
                 items={albums}
@@ -337,6 +365,7 @@ export default function App() {
                 render={(a) => (
                   <AlbumLine
                     album={a}
+                    onOpen={() => setDetail({ kind: 'album', id: a.id, title: a.name, subtitle: a.artist_name })}
                     onPlay={() => {
                       void library.playAlbum(a.id).catch((e) => setProblem(String(e)))
                     }}
@@ -350,11 +379,20 @@ export default function App() {
                 empty={<span className="text-muted">No playlists yet</span>}
                 render={(p) => (
                   <div
+                    onClick={() => setDetail({ kind: 'playlist', id: p.id, title: p.name })}
                     onDoubleClick={() =>
                       void library.playPlaylist(p.id).catch((e) => setProblem(String(e)))
                     }
-                    className="row mx-2 flex h-10 items-center gap-3 px-2"
-                    title="Double-click to play"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setDetail({ kind: 'playlist', id: p.id, title: p.name })
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    className="row mx-2 flex h-10 items-center gap-3 px-2 outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                    title="Open, or double-click to play"
                   >
                     <Art id={p.id} />
                     <span className="truncate">{p.name}</span>
@@ -433,12 +471,122 @@ function SongLine({
   )
 }
 
-function AlbumLine({ album, onPlay }: { album: AlbumRow; onPlay: () => void }) {
+/// The tracks inside an album or playlist.
+///
+/// Loads on open rather than up front: a library can hold hundreds of albums,
+/// and only the one being looked at needs its contents.
+function DetailView({
+  detail,
+  canPlay,
+  nowPlayingId,
+  trackIdOf,
+  onBack,
+  onProblem,
+}: {
+  detail: Detail
+  canPlay: (s: SongRow) => boolean
+  nowPlayingId: string | null
+  trackIdOf: (s: SongRow) => string | null
+  onBack: () => void
+  onProblem: (msg: string) => void
+}) {
+  const [songs, setSongs] = useState<SongRow[] | null>(null)
+
+  useEffect(() => {
+    setSongs(null)
+    const load =
+      detail.kind === 'album'
+        ? library.albumSongs(detail.id)
+        : library.playlistSongs(detail.id)
+    void load.then(setSongs).catch((e) => {
+      onProblem(String(e))
+      setSongs([])
+    })
+  }, [detail.kind, detail.id, onProblem])
+
+  const total = songs?.reduce((n, s) => n + s.duration_ms, 0) ?? 0
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-3 border-b border-rule/70 px-4 py-3">
+        <button
+          onClick={onBack}
+          className="rounded-md border border-rule px-2 py-1 text-[11px] text-muted transition-colors hover:border-muted hover:text-ink"
+        >
+          Back
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] text-ink">{detail.title}</div>
+          {detail.subtitle && (
+            <div className="truncate text-[11px] text-muted">{detail.subtitle}</div>
+          )}
+        </div>
+        <span className="label shrink-0">
+          {songs ? `${songs.length} · ${formatTime(total)}` : ''}
+        </span>
+        <button
+          onClick={() => {
+            if (songs && songs.length > 0) void library.play(songs, 0)
+          }}
+          disabled={!songs || songs.length === 0}
+          className="rounded-md border border-rule px-2.5 py-1 text-[11px] text-muted transition-colors hover:border-accent hover:text-ink disabled:opacity-40"
+        >
+          Play
+        </button>
+      </div>
+
+      {/* VirtualList positions itself absolutely, so it needs a positioned box
+          to fill - without this it resolves against an ancestor and covers the
+          header above. */}
+      <div className="relative min-h-0 flex-1">
+        {songs === null ? (
+          <div className="flex h-full items-center justify-center text-[11px] text-muted">
+            Reading…
+          </div>
+        ) : (
+          <VirtualList
+            items={songs}
+            rowHeight={ROW}
+            empty={<span className="text-muted">Nothing in here</span>}
+            render={(s, i) => (
+              <SongLine
+                song={s}
+                index={i}
+                playable={canPlay(s)}
+                playing={nowPlayingId !== null && trackIdOf(s) === nowPlayingId}
+                onPlay={() => void library.play(songs, i)}
+              />
+            )}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function AlbumLine({
+  album,
+  onOpen,
+  onPlay,
+}: {
+  album: AlbumRow
+  onOpen: () => void
+  onPlay: () => void
+}) {
   return (
     <div
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onOpen()
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      title="Open, or double-click to play"
       onDoubleClick={onPlay}
-      className="row mx-2 grid h-10 grid-cols-[36px_1fr_1fr_60px] items-center gap-3 px-2"
-      title="Double-click to play"
+      className="row mx-2 grid h-10 grid-cols-[36px_1fr_1fr_60px] items-center gap-3 px-2 outline-none focus-visible:ring-1 focus-visible:ring-accent"
     >
       <Art id={album.id} />
       <span className="truncate">{album.name}</span>

@@ -31,6 +31,7 @@
     "allow-library-albums",
     "allow-library-playlists",
     "allow-library-album-songs",
+    "allow-library-playlist-songs",
     "allow-library-search",
     "allow-library-counts",
     "allow-library-sync",

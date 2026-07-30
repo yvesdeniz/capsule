@@ -90,6 +90,18 @@ fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, 
                 state.player.lock().expect("player mutex").state().current().cloned();
             let Some(track) = track else { return };
 
+            // A local track's id is its path, so there is nothing to fetch.
+            let source = state.settings.lock().expect("settings mutex").source;
+            if source == crate::settings::Source::Local {
+                if let Err(e) = engine.load_file(std::path::PathBuf::from(&track.id)) {
+                    tracing::error!(error = %e, track = %track.id, "could not open local track");
+                    let _ = app.emit("playback://error", e.to_string());
+                    return;
+                }
+                engine.play();
+                return;
+            }
+
             let client = state.navidrome.lock().expect("navidrome mutex").clone();
             let Some(client) = client else {
                 tracing::warn!("native load with no navidrome client");
@@ -514,6 +526,15 @@ pub fn library_album_songs(
 }
 
 #[tauri::command]
+pub fn library_playlist_songs(
+    state: State<'_, AppState>,
+    playlist_id: String,
+) -> Result<Vec<SongRow>, String> {
+    let db = state.db.lock().expect("db mutex");
+    db.playlist_songs(&playlist_id).map_err(db_err)
+}
+
+#[tauri::command]
 pub fn library_search(
     state: State<'_, AppState>,
     query: String,
@@ -824,6 +845,7 @@ pub(crate) fn reconcile_backend(app: &AppHandle, source: crate::settings::Source
     }
 
     let settings = state.settings.lock().expect("settings mutex").clone();
+    // Local files need no client at all; only Navidrome talks to a server.
     *state.navidrome.lock().expect("navidrome mutex") =
         crate::source::navidrome_client(&settings).map(std::sync::Arc::new);
 

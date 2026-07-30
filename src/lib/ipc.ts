@@ -147,6 +147,8 @@ export const library = {
   albums: (limit = 500, offset = 0) => invoke<AlbumRow[]>('library_albums', { limit, offset }),
   playlists: () => invoke<PlaylistRow[]>('library_playlists'),
   albumSongs: (albumId: string) => invoke<SongRow[]>('library_album_songs', { albumId }),
+  playlistSongs: (playlistId: string) =>
+    invoke<SongRow[]>('library_playlist_songs', { playlistId }),
   search: (query: string, limit = 100) => invoke<SongRow[]>('library_search', { query, limit }),
   lyrics: (trackId: string) => invoke<LyricsResult>('lyrics_for', { trackId }),
   counts: () => invoke<LibraryCounts>('library_counts'),

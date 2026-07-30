@@ -32,6 +32,7 @@ fn main() {
                 "library_albums",
                 "library_playlists",
                 "library_album_songs",
+                "library_playlist_songs",
                 "library_search",
                 "library_counts",
                 "library_sync",
