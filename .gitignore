@@ -1,4 +1,4 @@
-# secrets — never commit
+# secrets never commit
 .env
 .env.local
 *.p8
@@ -27,7 +27,7 @@ Thumbs.db
 # logs
 *.log
 
-# working notes stay local — README is the only published document
+# working notes stay local README is the only published document
 *.md
 !/README.md
 docs/images/frame.html
