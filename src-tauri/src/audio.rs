@@ -5,7 +5,7 @@
 //! `OutputStream::try_default` / `Sink::try_new`.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -45,6 +45,12 @@ pub struct Engine {
     /// so the position ticker doesn't mistake the momentarily-empty sink for
     /// end-of-track.
     loading: Arc<AtomicBool>,
+    /// A seek that arrived while the track was still being set up.
+    pending_seek: Arc<Mutex<Option<u64>>>,
+    /// Bumped on every `load`. A decode thread checks it before touching the
+    /// sink: without it, a superseded load could append its track after a
+    /// newer one was already requested, or steal the newer track's seek.
+    generation: Arc<AtomicU64>,
 }
 
 impl Engine {
@@ -57,6 +63,8 @@ impl Engine {
             sink,
             current: Mutex::new(None),
             loading: Arc::new(AtomicBool::new(false)),
+            pending_seek: Arc::new(Mutex::new(None)),
+            generation: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -67,20 +75,29 @@ impl Engine {
     /// ticker turns it into `playback://error` on the one existing path.
     pub fn load(&self, url: String, cache: PathBuf) -> Result<(), AudioError> {
         self.sink.stop();
+        // Kept so a seek outside the buffer can restart the transfer.
+        let url_for_seek = url.clone();
 
         let shared: Shared = Arc::new((Mutex::new(CacheState::new()), Condvar::new()));
         // Cache file is created synchronously so the reader can open it
         // immediately; only the transfer is asynchronous.
-        stream::spawn_fetch(url, cache.clone(), shared.clone(), 0)?;
+        let cancel = stream::Cancel::default();
+        stream::spawn_fetch(url, cache.clone(), shared.clone(), 0, cancel.clone())?;
         *self.current.lock().expect("current mutex") = Some(shared.clone());
         self.loading.store(true, Ordering::SeqCst);
+        let mine = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
         let sink = self.sink.clone();
         let loading = self.loading.clone();
+        let pending = self.pending_seek.clone();
+        let generation = self.generation.clone();
+        let refetch_url = url_for_seek;
+        let cancel = cancel.clone();
         std::thread::spawn(move || {
             let _guard = ClearOnDrop(loading);
+            let current = || generation.load(Ordering::SeqCst) == mine;
 
-            let source = match StreamingSource::new(cache, shared.clone()) {
+            let source = match StreamingSource::new(cache, shared.clone(), refetch_url, cancel) {
                 Ok(s) => s,
                 Err(e) => {
                     shared.0.lock().expect("cache state mutex").fail(e.to_string());
@@ -88,9 +105,28 @@ impl Engine {
                     return;
                 }
             };
+            if !current() {
+                return;
+            }
             match rodio::Decoder::new(source) {
-                Ok(d) => sink.append(d),
+                Ok(d) => {
+                    // A newer load may have started while this one was probing
+                    // the stream; appending now would play the wrong track.
+                    if !current() {
+                        return;
+                    }
+                    sink.append(d);
+                    // Replay a seek made while this was still loading.
+                    if let Some(ms) = pending.lock().expect("pending seek mutex").take() {
+                        if let Err(e) = sink.try_seek(Duration::from_millis(ms)) {
+                            tracing::warn!(error = ?e, "deferred seek failed");
+                        }
+                    }
+                }
                 Err(e) => {
+                    if !current() {
+                        return;
+                    }
                     shared
                         .0
                         .lock()
@@ -115,7 +151,14 @@ impl Engine {
         self.sink.pause();
     }
 
+    /// A seek before the decoder exists cannot be applied, so it is held and
+    /// replayed once the track is in the sink. Dropping it snaps the bar back
+    /// on the next tick.
     pub fn seek(&self, ms: u64) {
+        if self.is_loading() {
+            *self.pending_seek.lock().expect("pending seek mutex") = Some(ms);
+            return;
+        }
         if let Err(e) = self.sink.try_seek(Duration::from_millis(ms)) {
             tracing::warn!(error = ?e, "seek not supported for this stream");
         }
@@ -128,6 +171,7 @@ impl Engine {
     pub fn stop(&self) {
         self.sink.stop();
         *self.current.lock().expect("current mutex") = None;
+        *self.pending_seek.lock().expect("pending seek mutex") = None;
     }
 
     pub fn position_ms(&self) -> u64 {
@@ -157,6 +201,8 @@ fn track_ended(was_playing: bool, sink_empty: bool) -> bool {
     was_playing && sink_empty
 }
 
+
+
 /// rodio has no non-blocking completion callback, so this polls. 250ms is
 /// fine for lyrics because `offset_ms` calibration already corrects reported
 /// position against real output.
@@ -183,6 +229,13 @@ pub fn start_ticker(app: tauri::AppHandle) {
                 let _ = app.emit("playback://error", err);
                 engine.stop();
                 was_playing = false;
+                // Stopping alone leaves status at Loading, showing a spinner over
+                // a track that will never start; this marks it stopped instead of
+                // auto-advancing, since that would tear through an entire
+                // broken-server queue.
+                let state = app.state::<crate::AppState>();
+                state.player.lock().expect("player mutex").set_status(crate::player::Status::Idle);
+                crate::commands::publish(&app, &state);
                 continue;
             }
 
@@ -214,6 +267,18 @@ pub fn start_ticker(app: tauri::AppHandle) {
                 // The same path the Next button uses, so repeat and
                 // end-of-queue behave identically however the track ended.
                 crate::commands::apply(&app, |p| p.next_track());
+
+                // At the end of the queue, `next_track` leaves the sink empty with
+                // an index still set; without this reset, Play would call
+                // sink.play() on nothing forever.
+                let ended = {
+                    let state = app.state::<crate::AppState>();
+                    let status = state.player.lock().expect("player mutex").state().status;
+                    status == crate::player::Status::Ended
+                };
+                if ended {
+                    engine.stop();
+                }
             }
             was_playing = !empty;
         }

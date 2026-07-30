@@ -11,7 +11,7 @@ use crate::auth::{self, AuthStatus};
 use crate::db::{AlbumRow, LibraryCounts, PlaylistRow, SongRow};
 use crate::engine;
 use crate::player::{EngineCommand, Player, PlayerState, Track};
-use crate::{sync, AppState};
+use crate::{sync, AppState, NowReported};
 
 pub fn apply(app: &AppHandle, f: impl FnOnce(&mut Player) -> Vec<EngineCommand>) {
     let state = app.state::<AppState>();
@@ -70,7 +70,16 @@ fn commit(app: &AppHandle, state: &AppState, cmds: Vec<EngineCommand>) {
 }
 
 fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, cmd: &EngineCommand) {
-    match native_action(cmd) {
+    let action = match native_action(cmd) {
+        // Play on an empty sink does nothing: after the queue ends, or after a
+        // stop, there is no source left to resume. Reload the current track
+        // instead of no-opping forever.
+        NativeAction::Play if engine.is_empty() && !engine.is_loading() => {
+            NativeAction::LoadCurrent
+        }
+        other => other,
+    };
+    match action {
         NativeAction::Ignore => {}
         NativeAction::Play => engine.play(),
         NativeAction::Pause => engine.pause(),
@@ -92,9 +101,10 @@ fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, 
                 crate::stream::cache_dir(data)
             };
             let Some(dir) = dir else { return };
-            crate::stream::prune(&dir, crate::stream::CACHE_CAP_BYTES, None);
-
             let path = crate::stream::cache_path(&dir, &track.id);
+            // Pass the file we are about to play: past the cap, eviction could
+            // otherwise delete the very file rodio is reading.
+            crate::stream::prune(&dir, crate::stream::CACHE_CAP_BYTES, Some(&path));
             let url = client.stream_url(&track.id);
             if let Err(e) = engine.load(url, path) {
                 tracing::error!(error = %e, track = %track.id, "native load failed");
@@ -121,6 +131,88 @@ pub(crate) fn publish(app: &AppHandle, state: &AppState) {
         crate::smtc::update(app, &snapshot);
         crate::thumbbar::refresh(app, snapshot.status);
     }
+    report_now_playing(app, state, &snapshot);
+}
+
+/// Announce what is playing to Discord and to the scrobbler.
+///
+/// Lives here rather than in the audio ticker, since the ticker only runs for
+/// native sources and would leave Apple playback unannounced. `publish` is the
+/// one place both backends converge.
+fn report_now_playing(app: &AppHandle, state: &AppState, snapshot: &PlayerState) {
+    use crate::player::Status;
+
+    let track = snapshot.current().cloned();
+    let stopped = matches!(snapshot.status, Status::Idle | Status::Ended) || track.is_none();
+
+    let mut last = state.now_reported.lock().expect("now reported mutex");
+
+    if stopped {
+        // Otherwise the presence card keeps claiming you're listening for as
+        // long as the app stays open.
+        if last.track_id.is_some() {
+            last.track_id = None;
+            last.scrobbled = false;
+            let presence = state.discord.lock().expect("discord mutex").clone();
+            if let Some(p) = presence {
+                std::thread::spawn(move || p.clear());
+            }
+        }
+        return;
+    }
+
+    let Some(track) = track else { return };
+    let changed = last.track_id.as_deref() != Some(track.id.as_str());
+    if changed {
+        last.track_id = Some(track.id.clone());
+        last.scrobbled = false;
+        scrobble(app, track.id.clone(), false);
+        present(app, track.clone(), snapshot.status);
+    }
+    if !last.scrobbled && crate::subsonic::scrobble_due(snapshot.position_ms, track.duration_ms) {
+        last.scrobbled = true;
+        scrobble(app, track.id.clone(), true);
+    }
+}
+
+/// Report a play to the server, which forwards it to whatever the user linked
+/// there. Only sources with a server that scrobbles have a client here.
+fn scrobble(app: &AppHandle, track_id: String, submission: bool) {
+    let client = { app.state::<AppState>().navidrome.lock().expect("navidrome mutex").clone() };
+    let Some(client) = client else { return };
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = client.scrobble(&track_id, submission).await {
+            tracing::debug!(error = %e, %track_id, submission, "scrobble rejected");
+        }
+    });
+}
+
+/// Resolve cover art, then hand the track to Discord.
+fn present(app: &AppHandle, track: Track, status: crate::player::Status) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let presence = { state.discord.lock().expect("discord mutex").clone() };
+        let Some(presence) = presence else { return };
+
+        let (from_server, api_key) = {
+            let s = state.settings.lock().expect("settings mutex");
+            (s.discord.serve_art_from_server, s.api_key().to_string())
+        };
+
+        let image = if from_server {
+            let client = { state.navidrome.lock().expect("navidrome mutex").clone() };
+            client.map(|c| c.cover_art_url(&track.id, 300))
+        } else {
+            let http = reqwest::Client::new();
+            crate::lastfm::album_art(&http, &api_key, &track.artist, &track.album).await
+        };
+
+        // Discord's IPC is synchronous and can block indefinitely on a payload
+        // it dislikes. On the async runtime that parks a worker, and the audio
+        // download runs on the same runtime.
+        std::thread::spawn(move || presence.show(&track, status, image.as_deref()));
+    });
 }
 
 #[tauri::command]
@@ -244,7 +336,7 @@ pub fn engine_ready(app: AppHandle, state: State<'_, AppState>, payload: ReadyPa
     match payload.reason.as_str() {
         "unauthorized" => {
             if !state.login_prompted.swap(true, Ordering::Relaxed) {
-                tracing::info!("not signed in — opening Apple Music login");
+                tracing::info!("not signed in - opening Apple Music login");
                 let _ = engine::show_for_login(&app);
             }
         }
@@ -459,6 +551,9 @@ pub fn settings_set(
     // show the previous source's library and write the new one's rows into it.
     if source != previous {
         use_database_for(&app, source)?;
+        // Without this the old source's backend keeps handling playback, with
+        // the new source's track ids.
+        reconcile_backend(&app, source);
         let _ = app.emit("library://updated", sync::counts(&app));
     }
     Ok(())
@@ -533,7 +628,7 @@ pub fn library_sync(app: AppHandle) {
 ///
 /// MusicKit plays from Apple's catalog, so that path needs `catalog_id` and a
 /// track without one is genuinely unplayable. Native sources address tracks by
-/// their own library id — and they never have a catalog id, so filtering on one
+/// their own library id - and they never have a catalog id, so filtering on one
 /// would silently discard the entire library.
 fn playable_id(source: crate::settings::Source, s: &SongRow) -> Option<String> {
     use crate::settings::Source;
@@ -596,6 +691,12 @@ pub fn play_songs(app: AppHandle, songs: Vec<SongRow>, start_index: Option<usize
     }
 }
 
+/// Whether the active source is served by Apple's catalog API.
+fn uses_apple_catalog(app: &AppHandle) -> bool {
+    let source = app.state::<AppState>().settings.lock().expect("settings mutex").source;
+    matches!(source, crate::settings::Source::Apple)
+}
+
 fn api_client(app: &AppHandle) -> Result<crate::api::Client, String> {
     let tokens = { app.state::<AppState>().tokens.lock().expect("tokens mutex").clone() };
     let tokens = tokens.filter(|t| t.is_complete()).ok_or("not signed in")?;
@@ -608,6 +709,12 @@ async fn ensure_album_songs(app: &AppHandle, album_id: &str) -> Result<Vec<SongR
         if !rows.is_empty() {
             return Ok(rows);
         }
+    }
+    // Only Apple backfills on demand. Other sources mirror everything during a
+    // sync, so an empty album means the sync is incomplete - querying the
+    // Apple API here would misreport it as not being signed in.
+    if !uses_apple_catalog(app) {
+        return Err("no tracks for this album yet - try syncing your library".into());
     }
     let fetched = api_client(app)?.album_tracks(album_id).await.map_err(|e| e.to_string())?;
     if fetched.is_empty() {
@@ -627,6 +734,9 @@ async fn ensure_playlist_songs(app: &AppHandle, playlist_id: &str) -> Result<Vec
         if !rows.is_empty() {
             return Ok(rows);
         }
+    }
+    if !uses_apple_catalog(app) {
+        return Err("no tracks for this playlist yet - try syncing your library".into());
     }
     let fetched = api_client(app)?.playlist_tracks(playlist_id).await.map_err(|e| e.to_string())?;
     if fetched.is_empty() {
@@ -664,8 +774,73 @@ pub async fn play_playlist(app: AppHandle, playlist_id: String) -> Result<(), St
 ///
 /// Each source has its own file, and the handle is opened once at startup from
 /// whatever source was configured then. Switching source at runtime without
-/// this writes the new source's rows into the previous source's database —
+/// this writes the new source's rows into the previous source's database -
 /// which corrupts both and defeats the per-source split entirely.
+/// Make the playback backend match the active source.
+///
+/// Sources need different machinery: Apple drives a hidden MusicKit webview,
+/// Navidrome decodes natively. Creating both is what made a Navidrome session
+/// carry a second Chromium loading music.apple.com - around half the app's
+/// memory, doing nothing. Leaving stale state behind is worse: after switching,
+/// commands route to the wrong backend and ids from one source get fed to the
+/// other.
+///
+/// Called on startup and on every source change, and safe to call twice.
+pub(crate) fn reconcile_backend(app: &AppHandle, source: crate::settings::Source) {
+    use crate::settings::Source;
+    let state = app.state::<AppState>();
+    let webview_source = matches!(source, Source::Apple | Source::Spotify);
+
+    // A queue from the previous source is meaningless here: its ids belong to
+    // a catalog this backend cannot address. Stop, forget it, and tell the UI
+    // and Discord, or both keep announcing a track that is not playing.
+    if let Some(engine) = state.audio.lock().expect("audio mutex").clone() {
+        engine.stop();
+    }
+    state.player.lock().expect("player mutex").reset_queue();
+    *state.now_reported.lock().expect("now reported mutex") = NowReported::default();
+    if let Some(presence) = state.discord.lock().expect("discord mutex").clone() {
+        std::thread::spawn(move || presence.clear());
+    }
+
+    if webview_source {
+        if crate::engine::window(app).is_none() {
+            let visible = crate::config::Runtime::from_env().show_engine_window;
+            if let Err(e) = crate::engine::spawn(app, visible) {
+                tracing::error!(error = %e, "could not start the playback engine");
+            }
+        }
+        *state.audio.lock().expect("audio mutex") = None;
+        *state.navidrome.lock().expect("navidrome mutex") = None;
+        return;
+    }
+
+    // Native source: tear the webview down rather than leaving it resident.
+    if let Some(w) = crate::engine::window(app) {
+        if let Err(e) = w.close() {
+            tracing::warn!(error = %e, "could not close the engine webview");
+        }
+        state.engine_ready.store(false, Ordering::Relaxed);
+    }
+
+    let settings = state.settings.lock().expect("settings mutex").clone();
+    *state.navidrome.lock().expect("navidrome mutex") =
+        crate::source::navidrome_client(&settings).map(std::sync::Arc::new);
+
+    let has_engine = state.audio.lock().expect("audio mutex").is_some();
+    if !has_engine {
+        match crate::audio::Engine::new() {
+            Ok(e) => {
+                *state.audio.lock().expect("audio mutex") = Some(std::sync::Arc::new(e));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "no audio output; playback disabled");
+                let _ = app.emit("playback://error", e.to_string());
+            }
+        }
+    }
+}
+
 fn use_database_for(app: &AppHandle, source: crate::settings::Source) -> Result<(), String> {
     let state = app.state::<AppState>();
     let dir = state.data_dir.lock().expect("data dir mutex").clone();
@@ -673,6 +848,10 @@ fn use_database_for(app: &AppHandle, source: crate::settings::Source) -> Result<
     let opened = crate::db::Db::open_at(&path).map_err(|e| e.to_string())?;
     tracing::info!(path = %path.display(), ?source, "switching library database");
     *state.db.lock().expect("db mutex") = opened;
+    // Any sync still running was writing into the file we just replaced. Bump
+    // the generation so it abandons itself rather than pouring the previous
+    // source's rows into this one.
+    state.db_generation.fetch_add(1, Ordering::SeqCst);
     Ok(())
 }
 
@@ -749,24 +928,75 @@ pub async fn navidrome_connect(
     // Must happen before the sync: otherwise Navidrome's rows land in whichever
     // database was open at launch.
     use_database_for(&app, crate::settings::Source::Navidrome)?;
+    reconcile_backend(&app, crate::settings::Source::Navidrome);
     let _ = app.emit("library://updated", sync::counts(&app));
-
-    // Navidrome plays natively. A missing output device is not fatal: the
-    // library still browses, playback just reports unavailable.
-    match crate::audio::Engine::new() {
-        Ok(e) => {
-            *app.state::<AppState>().audio.lock().expect("audio mutex") =
-                Some(std::sync::Arc::new(e));
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "no audio output; playback disabled");
-            let _ = app.emit("playback://error", e.to_string());
-        }
-    }
 
     let handle = app.clone();
     tauri::async_runtime::spawn(async move { sync::run(handle).await });
     Ok(())
+}
+
+/// Everything worth knowing in a bug report, as pasteable text.
+///
+/// Deliberately redacted: the server URL and username identify a private host,
+/// and no credential ever appears. What remains is what actually explains a
+/// fault - which source, which backend, what the library looks like, what the
+/// player thinks it is doing.
+#[tauri::command]
+pub fn dev_diagnostics(app: AppHandle) -> String {
+    let state = app.state::<AppState>();
+    let settings = state.settings.lock().expect("settings mutex").clone();
+    let player = state.player.lock().expect("player mutex").state().clone();
+    let counts = sync::counts(&app);
+
+    let has_audio = state.audio.lock().expect("audio mutex").is_some();
+    let has_navidrome = state.navidrome.lock().expect("navidrome mutex").is_some();
+    let has_discord = state.discord.lock().expect("discord mutex").is_some();
+    let engine_window = crate::engine::window(&app).is_some();
+    let db_path = {
+        let dir = state.data_dir.lock().expect("data dir mutex").clone();
+        crate::db::default_db_path(dir, settings.source)
+            .map(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
+            .unwrap_or_else(|_| "unknown".into())
+    };
+
+    format!(
+        "capsule {}\n\
+         source: {:?}   glass: {}\n\
+         backend: audio={} navidrome={} engine_webview={} discord={}\n\
+         database: {}\n\
+         library: {} songs, {} albums, {} playlists, {} artists\n\
+         player: {:?}  queue={} index={:?} position={}ms volume={} shuffle={} repeat={:?}\n\
+         navidrome: configured={} https={}\n\
+         lastfm_key={} discord_id={} serve_art_from_server={}\n\
+         onboarded: {}  developer: {}",
+        env!("CARGO_PKG_VERSION"),
+        settings.source,
+        settings.appearance.glass,
+        has_audio,
+        has_navidrome,
+        engine_window,
+        has_discord,
+        db_path,
+        counts.songs,
+        counts.albums,
+        counts.playlists,
+        counts.artists,
+        player.status,
+        player.queue.len(),
+        player.index,
+        player.position_ms,
+        player.volume,
+        player.shuffle,
+        player.repeat,
+        !settings.navidrome.url.trim().is_empty(),
+        !crate::subsonic::is_insecure(&settings.navidrome.url),
+        !settings.api_key().trim().is_empty(),
+        !settings.discord_client_id().trim().is_empty(),
+        settings.discord.serve_art_from_server,
+        settings.onboarded,
+        settings.developer,
+    )
 }
 
 #[tauri::command]
@@ -817,7 +1047,7 @@ mod tests {
     #[test]
     fn native_sources_queue_by_library_id_not_catalog_id() {
         use crate::settings::Source;
-        // Navidrome tracks have no catalog id — that is an Apple concept. If
+        // Navidrome tracks have no catalog id - that is an Apple concept. If
         // the queue filters on one, the entire library becomes unplayable and
         // the transport just says "Nothing queued".
         let navidrome_track = row("tr-1", None);

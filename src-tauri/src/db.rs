@@ -426,8 +426,11 @@ impl Db {
         let row = self
             .conn
             .query_row(
+                // Matched on either id: native sources have no catalog id, so
+                // looking up by that alone silently returns nothing and lyrics
+                // never resolve. Mirrors `artwork_for`.
                 "SELECT name, artist_name, album_name, duration_ms
-                 FROM songs WHERE catalog_id = ?1 LIMIT 1",
+                 FROM songs WHERE id = ?1 OR catalog_id = ?1 LIMIT 1",
                 params![catalog_id],
                 |r| {
                     Ok(SongLookup {
@@ -689,7 +692,7 @@ pub fn default_db_path(
 ///
 /// The `-wal` and `-shm` sidecars move with it. SQLite derives their names from
 /// the database filename, so renaming the main file alone strands the write-ahead
-/// log — and in WAL mode that log holds committed transactions that have not yet
+/// log - and in WAL mode that log holds committed transactions that have not yet
 /// been checkpointed. Losing it loses data.
 pub fn migrate_legacy_db(dir: &Path) -> std::io::Result<()> {
     let legacy = dir.join("library.sqlite3");
@@ -989,7 +992,7 @@ mod tests {
     }
 
     /// One test, not two: `CAPSULE_DB_PATH` is process-wide, and cargo runs
-    /// tests in parallel — a separate override test races this one and makes
+    /// tests in parallel - a separate override test races this one and makes
     /// both flaky.
     #[test]
     fn db_path_is_per_source_unless_overridden() {
@@ -1027,7 +1030,7 @@ mod tests {
     fn migration_takes_the_wal_and_shm_with_it() {
         // SQLite derives sidecar names from the database filename. Renaming the
         // main file alone strands the write-ahead log, and in WAL mode that log
-        // holds committed-but-uncheckpointed transactions — losing it loses data.
+        // holds committed-but-uncheckpointed transactions - losing it loses data.
         let dir = std::env::temp_dir().join(format!("capsule-legacy-wal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

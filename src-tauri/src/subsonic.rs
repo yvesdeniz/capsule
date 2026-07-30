@@ -1,6 +1,6 @@
 //! Subsonic API client, for Navidrome.
 //!
-//! Auth is Subsonic's salted-token scheme — `md5(password + salt)` — mandated
+//! Auth is Subsonic's salted-token scheme - `md5(password + salt)` - mandated
 //! by the protocol, not a security choice of ours. The plaintext password is
 //! needed at call time, so it lives in Windows Credential Manager
 //! ([`crate::auth`]), never on disk in `config.toml`.
@@ -16,8 +16,8 @@ pub const CLIENT_NAME: &str = "capsule";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SubsonicError {
-    #[error("http: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("{0}")]
+    Http(String),
     #[error("wrong username or password")]
     Unauthorized,
     #[error("server url is not usable: {0}")]
@@ -26,6 +26,29 @@ pub enum SubsonicError {
     Api { code: i32, message: String },
     #[error("server response was not valid subsonic json: {0}")]
     Malformed(String),
+}
+
+/// Describe a transport failure **without** the request URL.
+///
+/// `reqwest::Error`'s own Display embeds the URL it was fetching, and for
+/// Subsonic that URL carries `u`, `s` and `t` - a working bearer credential for
+/// the whole account until the password changes. These errors get logged and
+/// end up in bug reports, so the URL can never be part of the message.
+impl From<reqwest::Error> for SubsonicError {
+    fn from(e: reqwest::Error) -> Self {
+        let what = if e.is_timeout() {
+            "the server took too long to respond"
+        } else if e.is_connect() {
+            "could not reach the server"
+        } else if e.is_decode() {
+            "the server sent a malformed response"
+        } else if e.is_body() {
+            "the connection dropped mid-response"
+        } else {
+            "the request failed"
+        };
+        SubsonicError::Http(what.to_string())
+    }
 }
 
 pub fn auth_token(password: &str, salt: &str) -> String {
@@ -78,7 +101,7 @@ pub fn random_salt() -> String {
 
 /// `coverArt` is an opaque id, not a URL, and fetching one needs auth. We store
 /// `subsonic:<id>` and resolve to a signed URL at fetch time, so credentials
-/// never land in the database — which the README promises is safe to share.
+/// never land in the database - which the README promises is safe to share.
 pub const ARTWORK_PREFIX: &str = "subsonic:";
 
 /// Albums per `getAlbumList2` page. 500 is the Subsonic maximum.
@@ -162,8 +185,8 @@ pub fn album_from(a: WireAlbum) -> AlbumUpsert {
     }
 }
 
-/// Album fetches in flight. Songs are N+1 by construction — Subsonic has no
-/// "all songs" endpoint — so this is what keeps a few thousand albums
+/// Album fetches in flight. Songs are N+1 by construction - Subsonic has no
+/// "all songs" endpoint - so this is what keeps a few thousand albums
 /// tolerable without hammering a self-hosted server.
 const ALBUM_CONCURRENCY: usize = 8;
 
@@ -274,6 +297,10 @@ impl Client {
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent(concat!("capsule/", env!("CARGO_PKG_VERSION")))
+                // Without a timeout a silently stalled server holds the task
+                // and its socket for the life of the process.
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(60))
                 .build()?,
             creds: Credentials { base_url, ..creds },
         })
@@ -290,7 +317,7 @@ impl Client {
     }
 
     /// Public so artwork resolution can reuse it. The password is never a
-    /// query parameter — only the salt and the digest derived from it.
+    /// query parameter - only the salt and the digest derived from it.
     pub fn signed_url(&self, method: &str, extra: &[(&str, String)]) -> String {
         let mut params = auth_query(&self.creds.username, &self.creds.password, &random_salt());
         for (k, v) in extra {
@@ -370,6 +397,31 @@ impl Client {
 
     pub fn stream_url(&self, id: &str) -> String {
         self.signed_url("stream", &[("id", id.to_string())])
+    }
+
+    /// Carries auth in the query string, so anything that can reach the server
+    /// can fetch it without a session - which is what lets Discord's image bot
+    /// load it, and also why handing this URL out is a decision rather than a
+    /// detail.
+    pub fn cover_art_url(&self, id: &str, size: u32) -> String {
+        self.signed_url("getCoverArt", &[("id", id.to_string()), ("size", size.to_string())])
+    }
+
+    /// Report a play; the server forwards it to whatever the user linked there.
+    ///
+    /// `submission=false` is a now-playing ping, `true` a completed play. Going
+    /// through the server means capsule never holds Last.fm credentials.
+    pub async fn scrobble(&self, id: &str, submission: bool) -> Result<(), SubsonicError> {
+        #[derive(Deserialize)]
+        struct Empty {}
+        let _: Empty = self
+            .call(
+                "scrobble",
+                "",
+                &[("id", id.to_string()), ("submission", submission.to_string())],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Track ids for one playlist, in playlist order.
@@ -508,9 +560,48 @@ pub fn parse_envelope<T: serde::de::DeserializeOwned>(
     serde_json::from_value(payload).map_err(|e| SubsonicError::Malformed(e.to_string()))
 }
 
+/// Last.fm's own rule, which Navidrome forwards under: a play counts once it
+/// passes halfway or four minutes, whichever comes first, and tracks under
+/// 30 seconds never count.
+pub fn scrobble_due(position_ms: u64, duration_ms: u64) -> bool {
+    const MIN_TRACK_MS: u64 = 30_000;
+    const ALWAYS_AT_MS: u64 = 4 * 60 * 1000;
+    if duration_ms < MIN_TRACK_MS {
+        return false;
+    }
+    position_ms >= (duration_ms / 2).min(ALWAYS_AT_MS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_play_counts_at_the_halfway_mark() {
+        let three_min = 180_000;
+        assert!(!scrobble_due(89_000, three_min));
+        assert!(scrobble_due(90_000, three_min));
+    }
+
+    #[test]
+    fn long_tracks_count_at_four_minutes_not_halfway() {
+        // A 20-minute mix should not need 10 minutes to register.
+        let twenty_min = 1_200_000;
+        assert!(!scrobble_due(239_000, twenty_min));
+        assert!(scrobble_due(240_000, twenty_min));
+    }
+
+    #[test]
+    fn tracks_under_thirty_seconds_never_count() {
+        assert!(!scrobble_due(29_000, 29_000));
+        assert!(!scrobble_due(1_000_000, 12_000));
+    }
+
+    #[test]
+    fn a_track_of_unknown_length_never_counts() {
+        // duration 0 means we never learned it; guessing would invent plays.
+        assert!(!scrobble_due(500_000, 0));
+    }
 
     #[derive(Debug, serde::Deserialize, PartialEq)]
     struct Pong {}

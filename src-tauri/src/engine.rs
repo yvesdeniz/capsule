@@ -1,7 +1,7 @@
 //! Owns the hidden `music.apple.com` window that acts as our audio daemon.
 //!
 //! Rust drives it by evaluating JS against the hook; the hook reports back over
-//! IPC. Everything with a decision in it lives in [`crate::player`] — this
+//! IPC. Everything with a decision in it lives in [`crate::player`] - this
 //! module only translates [`EngineCommand`] into a JS call.
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};

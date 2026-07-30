@@ -1,4 +1,4 @@
-//! Windows taskbar thumbnail toolbar — Previous / Play-Pause / Next on the
+//! Windows taskbar thumbnail toolbar - Previous / Play-Pause / Next on the
 //! taskbar hover preview.
 //!
 //! Buttons cannot be registered when the window is created: the taskbar button
@@ -8,7 +8,7 @@
 //!
 //! Clicks arrive as `WM_COMMAND` on the main window, which already has a
 //! subclass in [`crate::snap`]; that wndproc forwards them here, and they are
-//! applied through `commands::apply` — the same entry point the tray menu and
+//! applied through `commands::apply` - the same entry point the tray menu and
 //! SMTC use, so no surface can drift from the others.
 
 use std::cell::RefCell;

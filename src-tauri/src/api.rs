@@ -20,7 +20,7 @@ const MAX_PAGES: u32 = 500;
 pub enum ApiError {
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("unauthorized — token rejected")]
+    #[error("unauthorized - token rejected")]
     Unauthorized,
     #[error("rate limited after retries")]
     RateLimited,
@@ -170,7 +170,7 @@ impl Client {
             on_page(page.data);
             pages += 1;
             if pages >= MAX_PAGES {
-                tracing::warn!("stopped paginating at {MAX_PAGES} pages — library truncated");
+                tracing::warn!("stopped paginating at {MAX_PAGES} pages - library truncated");
                 break;
             }
         }

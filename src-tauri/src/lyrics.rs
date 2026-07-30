@@ -2,7 +2,7 @@
 //!
 //! Apple's own lyrics endpoint needs an entitlement a $99 developer account
 //! does not grant, so the source is LRCLIB: open, unauthenticated, and it
-//! returns LRC directly. Misses are cached as emphatically as hits — most
+//! returns LRC directly. Misses are cached as emphatically as hits - most
 //! tracks have no synced lyrics, and re-asking on every play is both slow and
 //! rude to a free service.
 

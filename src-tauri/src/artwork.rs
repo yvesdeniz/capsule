@@ -190,7 +190,12 @@ pub async fn ensure_cached(
         }
         None => resolve_template(template, size),
     };
-    let resp = reqwest::get(&url).await?;
+    // The error is rebuilt without the URL on purpose: a Subsonic cover URL
+    // carries the account's signed token, and this failure gets logged.
+    let resp = reqwest::get(&url).await.map_err(|e| {
+        let what = if e.is_timeout() { "timed out" } else { "could not be fetched" };
+        format!("artwork {what}")
+    })?;
     if !resp.status().is_success() {
         return Err(format!("cdn {}", resp.status()).into());
     }
