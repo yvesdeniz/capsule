@@ -46,7 +46,7 @@ export function NavidromeConnect({
         <h2 className="text-[13px] text-ink">Connect to Navidrome</h2>
         <p className="mt-1 mb-4 text-[11px] leading-5 text-muted">
           Your password is verified against the server, then stored in Windows Credential Manager
-          — never in the settings file.
+          - never in the settings file.
         </p>
 
         <div className="space-y-3">

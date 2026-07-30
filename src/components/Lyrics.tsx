@@ -178,7 +178,7 @@ function Calibration({
       <button
         onClick={onReset}
         className="data text-[10px] text-muted hover:text-ink"
-        title="Current offset — click to reset"
+        title="Current offset - click to reset"
       >
         {offset === 0 ? 'sync' : `${offset > 0 ? '+' : ''}${(offset / 1000).toFixed(2)}s`}
       </button>
