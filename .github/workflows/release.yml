@@ -18,10 +18,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # tauri.conf.json targets nsis, which is Windows-only, so Linux
+          # compiled fine and bundled nothing. Each platform names its own.
           - platform: windows-latest
-            label: Windows
+            args: --bundles nsis
           - platform: ubuntu-22.04
-            label: Linux
+            args: --bundles deb,appimage
 
     runs-on: ${{ matrix.platform }}
 
@@ -65,6 +67,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: capsule ${{ github.ref_name }}
+          args: ${{ matrix.args }}
           releaseDraft: true
           prerelease: false
           releaseBody: |

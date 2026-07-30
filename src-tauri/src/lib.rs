@@ -269,6 +269,10 @@ pub fn run() {
             let glass = std::env::var("CAPSULE_GLASS").unwrap_or_else(|_| {
                 app.state::<AppState>().settings.lock().expect("settings mutex").appearance.glass.clone()
             });
+            // Only the Windows block below reads this - acrylic, snap and the
+            // thumbbar all need the window handle, and none of them exist
+            // elsewhere.
+            #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
             let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("capsule")
                 .inner_size(1160.0, 760.0)
