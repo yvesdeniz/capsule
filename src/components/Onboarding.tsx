@@ -98,8 +98,12 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
       } else void auth.showLogin()
     } else if (source === 'navidrome') {
       void connectNavidrome()
+    } else if (source === 'local') {
+      // Nothing to sign in to: the folders are the source, so scan them now.
+      setStep('sync')
+      void library.sync()
     } else {
-      // Local and Spotify have no client yet; keep the settings for later.
+      // Spotify has no client yet; keep the settings for later.
       setStep('lastfm')
     }
   }

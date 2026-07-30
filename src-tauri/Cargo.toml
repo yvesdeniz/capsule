@@ -38,6 +38,8 @@ http = "1"
 window-vibrancy = "0.6"
 rodio = "0.21.1"
 discord-rich-presence = "1.1.0"
+lofty = "0.22"
+walkdir = "2.5.0"
 
 [target.'cfg(windows)'.dependencies]
 # Frameless chrome needs raw Win32: window subclassing to answer WM_NCHITTEST

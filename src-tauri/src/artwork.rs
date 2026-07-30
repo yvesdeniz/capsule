@@ -37,7 +37,7 @@ pub fn subsonic_id(template: &str) -> Option<&str> {
 pub fn resolve_template(template: &str, size: u32) -> String {
     // Subsonic refs are not URLs and must not be mangled into one; the signed
     // URL is built at fetch time, where credentials are available.
-    if is_subsonic_ref(template) {
+    if is_subsonic_ref(template) || template.starts_with(crate::local::ARTWORK_PREFIX) {
         return template.to_string();
     }
     if template.contains("{w}") || template.contains("{h}") {
@@ -177,6 +177,22 @@ pub async fn ensure_cached(
     // request must not invalidate every cached cover.
     let path = cache_path(dir, template, size);
     if let Ok(bytes) = tokio::fs::read(&path).await {
+        return Ok(bytes);
+    }
+
+    // A local track carries its cover inside the file, so there is nothing to
+    // fetch: read it, cache it under the same key, done.
+    if let Some(file) = template.strip_prefix(crate::local::ARTWORK_PREFIX) {
+        let file = std::path::PathBuf::from(file);
+        let bytes = tokio::task::spawn_blocking(move || crate::local::embedded_picture(&file))
+            .await
+            .map_err(|e| format!("artwork read failed: {e}"))?
+            .ok_or("this file has no embedded cover")?;
+        if let Err(e) = tokio::fs::create_dir_all(dir).await {
+            tracing::debug!(error = %e, "artwork cache dir");
+        } else if let Err(e) = tokio::fs::write(&path, &bytes).await {
+            tracing::debug!(error = %e, "artwork cache write");
+        }
         return Ok(bytes);
     }
 

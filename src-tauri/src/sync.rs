@@ -70,6 +70,11 @@ pub async fn run(app: AppHandle) {
     // disagree about which server they are talking to.
     let (settings, navidrome_password) = crate::source::resolve(&settings);
 
+    // Local files have no server and no client: the disk is the source.
+    if settings.source == crate::settings::Source::Local {
+        return scan_local(app.clone(), settings.local.folders.clone(), lease).await;
+    }
+
     let client = match crate::source::connect(&settings, tokens, navidrome_password) {
         Ok(c) => c,
         Err(e) => {
@@ -259,6 +264,97 @@ pub fn counts(app: &AppHandle) -> LibraryCounts {
     let state = app.state::<AppState>();
     let db = state.db.lock().expect("db mutex");
     db.counts().unwrap_or_default()
+}
+
+/// Walk the configured folders and mirror what is there into the library.
+///
+/// Reading tags is blocking work, so the walk happens off the async runtime.
+/// Rows land in batches for the same reason the network sources batch: the UI
+/// shows progress while a large library is still being read.
+async fn scan_local(app: AppHandle, folders: Vec<std::path::PathBuf>, lease: SyncLease) {
+    use crate::local;
+
+    if folders.is_empty() {
+        tracing::info!("local source with no folders configured");
+        let _ = app.emit(
+            "library://failed",
+            SyncFailed { reason: "no music folders chosen yet".into(), needs_auth: false },
+        );
+        drop(lease);
+        return;
+    }
+
+    let generation = app.state::<AppState>().db_generation.load(Ordering::SeqCst);
+    let emit_progress = |songs: u32, albums: u32, done: bool| {
+        emit(&app, &Progress { stage: "songs", songs, albums, playlists: 0, done });
+    };
+    emit_progress(0, 0, false);
+
+    let scanned = tauri::async_runtime::spawn_blocking(move || {
+        let files = local::walk(&folders);
+        let mut songs = Vec::with_capacity(files.len());
+        let mut tags = std::collections::HashMap::new();
+        for path in files {
+            let Some(t) = local::read_tags(&path) else {
+                tracing::debug!(path = %path.display(), "unreadable file; skipping");
+                continue;
+            };
+            let song = local::song_from(&path, &t);
+            tags.insert(song.id.clone(), t);
+            songs.push(song);
+        }
+        (songs, tags)
+    })
+    .await;
+
+    let (songs, tags) = match scanned {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "folder scan failed");
+            let _ = app.emit(
+                "library://failed",
+                SyncFailed { reason: "could not read your music folders".into(), needs_auth: false },
+            );
+            drop(lease);
+            return;
+        }
+    };
+
+    let albums = local::albums_from(&songs, &tags);
+    let artists = local::artists_from(&songs);
+
+    let state = app.state::<AppState>();
+    if state.db_generation.load(Ordering::SeqCst) != generation {
+        tracing::info!("library switched mid-scan; abandoning");
+        drop(lease);
+        return;
+    }
+
+    {
+        let mut db = state.db.lock().expect("db mutex");
+        if let Err(e) = db.upsert_songs(&songs) {
+            tracing::error!(error = %e, "song write failed");
+        }
+        if let Err(e) = db.upsert_albums(&albums) {
+            tracing::error!(error = %e, "album write failed");
+        }
+        if let Err(e) = db.upsert_artists(&artists) {
+            tracing::error!(error = %e, "artist write failed");
+        }
+    }
+
+    emit_progress(songs.len() as u32, albums.len() as u32, true);
+    tracing::info!(songs = songs.len(), albums = albums.len(), "local scan complete");
+
+    {
+        let db = state.db.lock().expect("db mutex");
+        let _ = db.set_meta("last_sync_ok", "1");
+    }
+    let _ = app.emit("library://updated", counts(&app));
+    drop(lease);
+
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move { crate::artwork::prefetch(handle, 56).await });
 }
 
 #[cfg(test)]

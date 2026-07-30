@@ -1,9 +1,9 @@
-//! capsule - a fast Apple Music desktop client.
+//! capsule - a fast music client for Windows.
 //!
-//! Rust owns all state. The React UI and the hidden `music.apple.com` engine
-//! window are both just clients of it, which is what keeps the now-playing
-//! view, the OS media controls and (later) Discord and Last.fm from ever
-//! disagreeing with each other.
+//! Rust owns all state. The React UI, the hidden `music.apple.com` engine
+//! window, and the native decoder are all just clients of it, which is what
+//! keeps the now-playing view, the OS media controls, Discord and the scrobbler
+//! from ever disagreeing with each other.
 
 pub mod api;
 pub mod audio;
@@ -15,6 +15,7 @@ pub mod db;
 pub mod discord;
 pub mod engine;
 pub mod lastfm;
+pub mod local;
 pub mod lyrics;
 pub mod player;
 pub mod settings;
@@ -140,11 +141,86 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Build the main window and attach everything that hangs off its handle.
+///
+/// Callable more than once: closing to the tray destroys the window to release
+/// the webview's memory, and showing it again rebuilds from here. All state
+/// lives in Rust, so the fresh UI rehydrates itself over IPC.
+fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+        .title("capsule")
+        .inner_size(1160.0, 760.0)
+        .min_inner_size(880.0, 560.0)
+        .resizable(true)
+        .decorations(false)
+        .transparent(glass != "none")
+        .initialization_script(format!(
+            r#"(function () {{
+                var v = {};
+                function set() {{
+                    if (document.documentElement) {{
+                        document.documentElement.dataset.glass = v;
+                        return true;
+                    }}
+                    return false;
+                }}
+                if (!set()) {{
+                    document.addEventListener('DOMContentLoaded', set);
+                }}
+            }})();"#,
+            serde_json::to_string(glass).unwrap_or_else(|_| "\"none\"".into())
+        ))
+        .build()?;
+
+    // Closing releases the webview rather than exiting: the tray keeps playback
+    // running, and a hidden renderer would still hold its memory.
+    {
+        let app = app.clone();
+        main.clone().on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.destroy();
+                }
+            }
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use window_vibrancy::{apply_acrylic, apply_mica};
+        let applied = match glass {
+            "acrylic-chrome" | "acrylic-all" => {
+                apply_acrylic(&main, Some((13, 16, 20, 24))).map(|_| "acrylic")
+            }
+            "mica" => apply_mica(&main, Some(true)).map(|_| "mica"),
+            _ => Ok("none"),
+        };
+        match applied {
+            Ok(m) => tracing::info!(material = m, variant = %glass, "window material"),
+            Err(e) => tracing::warn!(error = %e, variant = %glass, "material unavailable"),
+        }
+
+        snap::install(&main);
+        thumbbar::install(&main, app);
+        app.state::<AppState>().smtc.init(app);
+    }
+
+    Ok(())
+}
+
 fn show_main(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+        return;
+    }
+    // Destroyed on close to free the webview; rebuild it.
+    let glass = app.state::<AppState>().settings.lock().expect("settings mutex").appearance.glass.clone();
+    if let Err(e) = open_main_window(app, &glass) {
+        tracing::error!(error = %e, "could not reopen the main window");
     }
 }
 
@@ -157,7 +233,6 @@ fn init_tracing() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    engine::apply_webview_flags();
     init_tracing();
 
     let runtime = config::Runtime::from_env();
@@ -191,6 +266,7 @@ pub fn run() {
             commands::library_albums,
             commands::library_playlists,
             commands::library_album_songs,
+            commands::library_playlist_songs,
             commands::library_search,
             commands::library_counts,
             commands::library_sync,
@@ -269,56 +345,13 @@ pub fn run() {
             let glass = std::env::var("CAPSULE_GLASS").unwrap_or_else(|_| {
                 app.state::<AppState>().settings.lock().expect("settings mutex").appearance.glass.clone()
             });
-            // Only the Windows block below reads this - acrylic, snap and the
-            // thumbbar all need the window handle, and none of them exist
-            // elsewhere.
-            #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-            let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-                .title("capsule")
-                .inner_size(1160.0, 760.0)
-                .min_inner_size(880.0, 560.0)
-                .resizable(true)
-                .decorations(false)
-                .transparent(glass != "none")
-                .initialization_script(format!(
-                    r#"(function () {{
-                        var v = {};
-                        function set() {{
-                            if (document.documentElement) {{
-                                document.documentElement.dataset.glass = v;
-                                return true;
-                            }}
-                            return false;
-                        }}
-                        if (!set()) {{
-                            document.addEventListener('DOMContentLoaded', set);
-                        }}
-                    }})();"#,
-                    serde_json::to_string(&glass).unwrap_or_else(|_| "\"none\"".into())
-                ))
-                .build()?;
-
-            #[cfg(target_os = "windows")]
-            {
-                use window_vibrancy::{apply_acrylic, apply_mica};
-                let applied = match glass.as_str() {
-                    "acrylic-chrome" | "acrylic-all" => {
-                        apply_acrylic(&main, Some((13, 16, 20, 24))).map(|_| "acrylic")
-                    }
-                    "mica" => apply_mica(&main, Some(true)).map(|_| "mica"),
-                    _ => Ok("none"),
-                };
-                match applied {
-                    Ok(m) => tracing::info!(material = m, variant = %glass, "window material"),
-                    Err(e) => tracing::warn!(error = %e, variant = %glass, "material unavailable"),
-                }
-
-                snap::install(&main);
-
-                thumbbar::install(&main, &handle);
-
-                app.state::<AppState>().smtc.init(&handle);
-            }
+            // Before the first webview: only the sources that run a hidden
+            // engine window need the anti-throttling flags.
+            engine::apply_webview_flags(matches!(
+                active_source,
+                settings::Source::Apple | settings::Source::Spotify
+            ));
+            open_main_window(&handle, &glass)?;
 
             build_tray(app)?;
 

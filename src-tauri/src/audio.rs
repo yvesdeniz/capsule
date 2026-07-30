@@ -1,4 +1,4 @@
-//! Native playback: a rodio sink fed by the streaming source.
+//! Native playback: a rodio sink fed by a stream or a file on disk.
 //!
 //! rodio 0.21's constructors differ from most published examples:
 //! `OutputStreamBuilder::open_default_stream` and `Sink::connect_new`, not
@@ -116,7 +116,6 @@ impl Engine {
                         return;
                     }
                     sink.append(d);
-                    // Replay a seek made while this was still loading.
                     if let Some(ms) = pending.lock().expect("pending seek mutex").take() {
                         if let Err(e) = sink.try_seek(Duration::from_millis(ms)) {
                             tracing::warn!(error = ?e, "deferred seek failed");
@@ -134,6 +133,53 @@ impl Engine {
                         .fail(format!("could not decode this track: {e}"));
                     shared.1.notify_all();
                 }
+            }
+        });
+        Ok(())
+    }
+
+    /// Play a file straight from disk.
+    ///
+    /// Local files need none of the streaming machinery: no fetch, no cache, no
+    /// ranged refetch on seek. The decode still runs off the command thread,
+    /// because probing a large FLAC is not instant.
+    pub fn load_file(&self, path: PathBuf) -> Result<(), AudioError> {
+        self.sink.stop();
+        *self.current.lock().expect("current mutex") = None;
+        self.loading.store(true, Ordering::SeqCst);
+        let mine = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+        let sink = self.sink.clone();
+        let loading = self.loading.clone();
+        let pending = self.pending_seek.clone();
+        let generation = self.generation.clone();
+        std::thread::spawn(move || {
+            let _guard = ClearOnDrop(loading);
+            let current = || generation.load(Ordering::SeqCst) == mine;
+
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => std::io::BufReader::new(f),
+                Err(e) => {
+                    tracing::error!(error = %e, path = %path.display(), "could not open track");
+                    return;
+                }
+            };
+            if !current() {
+                return;
+            }
+            match rodio::Decoder::new(file) {
+                Ok(d) => {
+                    if !current() {
+                        return;
+                    }
+                    sink.append(d);
+                    if let Some(ms) = pending.lock().expect("pending seek mutex").take() {
+                        if let Err(e) = sink.try_seek(Duration::from_millis(ms)) {
+                            tracing::warn!(error = ?e, "deferred seek failed");
+                        }
+                    }
+                }
+                Err(e) => tracing::error!(error = %e, path = %path.display(), "could not decode"),
             }
         });
         Ok(())
@@ -186,7 +232,6 @@ impl Engine {
         self.sink.is_paused()
     }
 
-    /// The fetch or decode error for the current track, if it died.
     pub fn current_error(&self) -> Option<String> {
         let guard = self.current.lock().expect("current mutex");
         let shared = guard.as_ref()?;

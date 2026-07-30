@@ -110,6 +110,8 @@ pub fn connect(
                 password,
             })?))
         }
+        // Local files have no client: scanning reads the disk directly, and
+        // playback opens the path. `sync` special-cases it before reaching here.
         Source::Local => Err(ConnectError::Unsupported("local")),
         Source::Spotify => Err(ConnectError::Unsupported("spotify")),
     }

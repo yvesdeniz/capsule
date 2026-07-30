@@ -12,7 +12,7 @@ export interface SourceInfo {
 
 export const SOURCES: SourceInfo[] = [
   { id: 'apple', name: 'Apple Music', blurb: 'Sign in with your subscription', ready: true },
-  { id: 'local', name: 'Local files', blurb: 'Point at a folder on this machine', ready: false },
+  { id: 'local', name: 'Local files', blurb: 'Point at a folder on this machine', ready: true },
   { id: 'navidrome', name: 'Navidrome', blurb: 'Connect to your own server', ready: true },
   { id: 'spotify', name: 'Spotify', blurb: 'Sign in with Premium', ready: false },
 ]
