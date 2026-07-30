@@ -17,7 +17,15 @@ fn engine_url() -> String {
     std::env::var("CAPSULE_ENGINE_URL").unwrap_or_else(|_| DEFAULT_ENGINE_URL.to_string())
 }
 
-pub fn apply_webview_flags() {
+/// Stop Chromium throttling and occlusion-checking its renderers.
+///
+/// The hidden engine window needs it or playback stutters once throttled. Every
+/// other source needs it too, for a different reason: without it Chromium runs
+/// its occlusion path on minimise and resize, which crashes against a
+/// transparent acrylic window.
+///
+/// Must run before the first webview exists; that is when WebView2 reads it.
+pub fn apply_webview_flags(_hidden_engine: bool) {
     #[cfg(target_os = "windows")]
     std::env::set_var(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
