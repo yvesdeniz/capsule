@@ -23,12 +23,13 @@ export type Source = 'apple' | 'spotify' | 'navidrome' | 'local'
 export interface Settings {
   source: Source
   onboarded: boolean
+  developer: boolean
   appearance: { glass: string }
   navidrome: { url: string; username: string }
   local: { folders: string[] }
   lyrics: { offset_ms: number }
   lastfm: { api_key: string; shared_secret: string }
-  discord: { client_id: string }
+  discord: { client_id: string; serve_art_from_server: boolean }
 }
 
 export const settings = {
@@ -162,6 +163,7 @@ export function artworkUrl(id: string, size = 96): string {
 
 export const dev = {
   loadRecent: () => invoke<void>('dev_load_recent'),
+  diagnostics: () => invoke<string>('dev_diagnostics'),
 }
 
 type Events = {

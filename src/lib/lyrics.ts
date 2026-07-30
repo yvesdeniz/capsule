@@ -2,7 +2,7 @@
  * Lyric timing helpers.
  *
  * These mirror `lyrics::active_line` in Rust and run on every position tick, so
- * they live here rather than crossing IPC — a round trip per second for an
+ * they live here rather than crossing IPC - a round trip per second for an
  * integer comparison would be absurd.
  */
 import type { LyricLine } from './ipc'

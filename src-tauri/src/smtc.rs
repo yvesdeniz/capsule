@@ -1,4 +1,4 @@
-//! Windows System Media Transport Controls — the media flyout that shows the
+//! Windows System Media Transport Controls - the media flyout that shows the
 //! current track with prev / play-pause / next, and receives hardware media
 //! keys.
 //!
@@ -27,7 +27,7 @@ use crate::player::{PlayerState, Status};
 use crate::AppState;
 
 struct Controls(MediaControls);
-// SAFETY: see the module docs — only ever touched on the main thread.
+// SAFETY: see the module docs - only ever touched on the main thread.
 unsafe impl Send for Controls {}
 
 #[derive(Default)]

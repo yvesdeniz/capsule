@@ -210,7 +210,7 @@ function NavidromeSetup({
       <Field
         label="Password"
         type="password"
-        placeholder={status?.configured ? 'Stored — enter to change' : ''}
+        placeholder={status?.configured ? 'Stored - enter to change' : ''}
         value={password}
         onChange={setPassword}
         onEnter={() => void connect()}
@@ -243,7 +243,7 @@ function NavidromeSetup({
         </p>
       )}
       <p className="text-[11px] leading-5 text-muted">
-        The password is checked against your server, then kept in Windows Credential Manager —
+        The password is checked against your server, then kept in Windows Credential Manager -
         never in the settings file.
       </p>
     </div>
@@ -261,7 +261,7 @@ export function SourceSetup({
   if (draft.source === 'apple' || draft.source === 'spotify') {
     return (
       <p className="text-[13px] leading-6 text-muted">
-        Sign-in happens on the service&apos;s own login page. capsule never sees your password —
+        Sign-in happens on the service&apos;s own login page. capsule never sees your password -
         only the tokens the page hands back, stored in Windows Credential Manager.
       </p>
     )
@@ -307,10 +307,60 @@ export function DiscordFields({
   edit: (patch: Partial<Settings>) => void
 }) {
   return (
-    <Field
-      label="Client ID"
-      value={draft.discord.client_id}
-      onChange={(v) => edit({ discord: { client_id: v } })}
-    />
+    <div className="space-y-4">
+      <Field
+        label="Client ID"
+        value={draft.discord.client_id}
+        onChange={(v) => edit({ discord: { ...draft.discord, client_id: v } })}
+      />
+      <Switch
+        label="Serve cover art from your server"
+        note="Discord fetches the image itself, so your server must be reachable from the internet. The link it receives also works for the rest of your library - leave this off unless you are comfortable with that."
+        on={draft.discord.serve_art_from_server}
+        onChange={(v) => edit({ discord: { ...draft.discord, serve_art_from_server: v } })}
+      />
+      {!draft.discord.serve_art_from_server && (
+        <p className="text-[11px] leading-5 text-muted">
+          Cover art comes from Last.fm instead, which needs the API key above and only finds
+          albums Last.fm knows.
+        </p>
+      )}
+    </div>
+  )
+}
+
+export function Switch({
+  label,
+  note,
+  on,
+  onChange,
+}: {
+  label: string
+  note?: string
+  on: boolean
+  onChange: (v: boolean) => void
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <div className="text-[13px] text-ink">{label}</div>
+        {note && <p className="mt-0.5 text-[11px] leading-5 text-muted">{note}</p>}
+      </div>
+      <button
+        role="switch"
+        aria-checked={on}
+        aria-label={label}
+        onClick={() => onChange(!on)}
+        className={`mt-0.5 h-5 w-9 shrink-0 rounded-full border transition-colors ${
+          on ? 'border-accent bg-accent/30' : 'border-rule bg-ground'
+        }`}
+      >
+        <span
+          className={`block size-3.5 rounded-full transition-transform ${
+            on ? 'translate-x-4 bg-accent' : 'translate-x-0.5 bg-muted'
+          }`}
+        />
+      </button>
+    </div>
   )
 }

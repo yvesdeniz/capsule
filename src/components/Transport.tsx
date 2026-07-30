@@ -13,8 +13,14 @@ export function Transport({
   const repeat = state?.repeat ?? 'off'
 
   return (
-    <div className="grid grid-cols-[44px_1fr_auto] items-center gap-4 border-t border-rule px-4 py-3 [background:var(--surface-panel)]">
-      <div className="size-11 border border-rule bg-ground">
+    <div className="chrome relative isolate grid grid-cols-[44px_1fr_auto] items-center gap-4 overflow-hidden border-t border-rule/70 px-4 py-3">
+      {track && (
+        <div
+          className="backlight -z-10"
+          style={{ backgroundImage: `url(${artworkUrl(track.id, 88)})` }}
+        />
+      )}
+      <div className="size-11 overflow-hidden rounded-md border border-rule/80 bg-ground">
         {track && (
           <img
             src={artworkUrl(track.id, 88)}

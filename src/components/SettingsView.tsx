@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import { auth, library, settings, type Settings } from '../lib/ipc'
+import { auth, dev, library, settings, type Settings } from '../lib/ipc'
 import {
   Cards,
   DiscordFields,
@@ -8,11 +8,12 @@ import {
   LastfmFields,
   SOURCES,
   SourceSetup,
+  Switch,
 } from './fields'
 
 /**
  * Everything in config.toml that deserves a control, in the order people
- * actually change it. Writes on every edit — there is no Save button, because a
+ * actually change it. Writes on every edit - there is no Save button, because a
  * settings screen that can lose your work is worse than one that cannot.
  */
 export function SettingsView() {
@@ -124,7 +125,62 @@ export function SettingsView() {
           </div>
           {note && <p className="mt-3 text-[11px] text-muted">{note}</p>}
         </Section>
+
+        <Section
+          title="Developer"
+          sub="Diagnostics for filing a bug report. Off by default because it is noise otherwise."
+        >
+          <Switch
+            label="Developer mode"
+            on={draft.developer}
+            onChange={(developer) => edit({ developer })}
+          />
+          {draft.developer && <Diagnostics />}
+        </Section>
       </div>
+    </div>
+  )
+}
+
+/**
+ * The state of the app as pasteable text.
+ *
+ * Exists so a bug report arrives with the facts already in it: which source,
+ * which backend, what the player thinks it is doing. The server URL and every
+ * credential are redacted on the Rust side.
+ */
+function Diagnostics() {
+  const [text, setText] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    void dev.diagnostics().then(setText)
+  }, [])
+
+  const refresh = async () => {
+    setCopied(false)
+    setText(await dev.diagnostics())
+  }
+
+  const copy = async () => {
+    const latest = await dev.diagnostics()
+    setText(latest)
+    await navigator.clipboard.writeText(latest)
+    setCopied(true)
+  }
+
+  return (
+    <div className="mt-4">
+      <pre className="data max-h-56 overflow-auto rounded-md border border-rule bg-ground p-3 text-[10px] leading-5 text-muted">
+        {text ?? 'Reading…'}
+      </pre>
+      <div className="mt-2 flex items-center gap-2">
+        <Action label={copied ? 'Copied' : 'Copy diagnostics'} onClick={() => void copy()} />
+        <Action label="Refresh" onClick={() => void refresh()} />
+      </div>
+      <p className="mt-3 text-[11px] leading-5 text-muted">
+        Paste this into a bug report. Your server address and password are not included.
+      </p>
     </div>
   )
 }

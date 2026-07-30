@@ -64,6 +64,24 @@ export default function App() {
   sourceRef.current = source
   const lastListRefresh = useRef(0)
 
+  // Everything below belongs to one source. Carrying it across a switch left
+  // search results pointing at a database Rust had closed, an Apple-worded
+  // error banner over a Navidrome library, and stale sync progress hiding the
+  // empty-library screen.
+  const applySource = useCallback((next: Source) => {
+    setSource((prev) => {
+      if (prev !== next) {
+        setQuery('')
+        setResults(null)
+        setProblem(null)
+        setProgress(null)
+      }
+      return next
+    })
+    if (next === 'navidrome') void navidromeIpc.status().then(setNdStatus)
+    else setNdStatus(null)
+  }, [])
+
   const reload = useCallback(async () => {
     const [s, a, p, c] = await Promise.all([
       library.songs(),
@@ -83,9 +101,7 @@ export default function App() {
     void auth.status().then(setAuthed)
     void settings.get().then((s) => {
       setOnboarding(!s.onboarded)
-      setSource(s.source)
-      if (s.source === 'navidrome') void navidromeIpc.status().then(setNdStatus)
-      else setNdStatus(null)
+      applySource(s.source)
     })
 
     const subs = [
@@ -108,11 +124,7 @@ export default function App() {
         // Connecting from Settings switches the source underneath us and kicks
         // off a sync. Re-read it here so the status strip and transport stop
         // describing the source we are no longer on.
-        void settings.get().then((s) => {
-          setSource(s.source)
-          if (s.source === 'navidrome') void navidromeIpc.status().then(setNdStatus)
-          else setNdStatus(null)
-        })
+        void settings.get().then((s) => applySource(s.source))
       }),
       on('library://failed', (f) => {
         setProgress(null)
@@ -167,15 +179,22 @@ export default function App() {
 
   const shown: SongRow[] = useMemo(() => results ?? songs, [results, songs])
 
-  // Apple and Spotify play from their catalog, so a row without a catalog id
-  // genuinely cannot be played. Native sources address tracks by their own
-  // library id and never have a catalog id — judging them by one greys out the
-  // entire library and swallows the double-click before it reaches Rust.
-  const canPlay = useCallback(
-    (s: SongRow) =>
-      source === 'navidrome' || source === 'local' ? true : s.catalog_id !== null,
+  // The id the queue addresses a track by. Apple and Spotify play from their
+  // catalog, so a row without a catalog id genuinely cannot be played; native
+  // sources use their own library id and never have a catalog id, so judging
+  // them by one greys out the whole library and swallows the double-click
+  // before it reaches Rust.
+  const trackIdOf = useCallback(
+    (s: SongRow) => (source === 'navidrome' || source === 'local' ? s.id : s.catalog_id),
     [source],
   )
+  const canPlay = useCallback((s: SongRow) => trackIdOf(s) !== null, [trackIdOf])
+
+  const nowPlayingId =
+    state && state.index !== null ? (state.queue[state.index]?.id ?? null) : null
+  // Apple and Spotify play through the hidden webview; everything else decodes
+  // in Rust, where the engine, sign-in and storefront have no meaning.
+  const webviewSource = source === 'apple' || source === 'spotify'
   const empty = counts !== null && counts.songs === 0 && counts.albums === 0
 
   if (onboarding) {
@@ -207,7 +226,7 @@ export default function App() {
     <div className="flex h-full flex-col">
       <header
         data-tauri-drag-region
-        className="flex h-11 shrink-0 items-center gap-3 border-b border-rule pr-0 pl-4 [background:var(--surface-panel)]"
+        className="chrome flex h-11 shrink-0 items-center gap-3 border-b border-rule/70 pr-0 pl-4"
       >
         <span data-tauri-drag-region className="shrink-0 text-[13px] font-semibold tracking-tight">
           capsule
@@ -227,13 +246,18 @@ export default function App() {
           ⌘K
         </button>
         <span data-tauri-drag-region className="ml-auto shrink-0 pr-3 label">
-          {authed?.authenticated ? `signed in · ${authed.storefront ?? ''}` : 'not signed in'}
+          {/* Apple tokens say nothing about a Navidrome session. */}
+          {webviewSource
+            ? authed?.authenticated
+              ? `signed in · ${authed.storefront ?? ''}`
+              : 'not signed in'
+            : SOURCE_NAME[source].toLowerCase()}
         </span>
         <WindowControls />
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <nav className="flex w-44 shrink-0 flex-col gap-0.5 py-3 [background:var(--surface-panel)]">
+        <nav className="chrome flex w-44 shrink-0 flex-col gap-0.5 py-3">
           <div className="px-4 pt-2 pb-1.5 label">
             Library
           </div>
@@ -267,12 +291,15 @@ export default function App() {
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {problem && (
-            <div className="flex items-center gap-3 border-b border-rule bg-panel px-4 py-2.5 text-xs">
-              <span className="text-accent">{problem}</span>
-              {!authed?.authenticated && (
+            <div className="flex items-center gap-3 border-b border-rule/70 bg-[color-mix(in_srgb,var(--color-warn)_9%,transparent)] px-4 py-2.5 text-xs">
+              <span className="text-warn">{problem}</span>
+              {/* Apple's login lives in the engine webview, which native
+                  sources do not have. Offering it on a Navidrome error sent
+                  people to the wrong service entirely. */}
+              {webviewSource && !authed?.authenticated && (
                 <button
                   onClick={() => void auth.showLogin()}
-                  className="border border-rule px-2 py-1 text-[11px] hover:border-accent"
+                  className="rounded-md border border-rule px-2 py-1 text-[11px] transition-colors hover:border-muted hover:text-ink"
                 >
                   Open sign-in
                 </button>
@@ -286,7 +313,7 @@ export default function App() {
             ) : view === 'lyrics' && !results ? (
               <Lyrics state={state} />
             ) : empty && !progress ? (
-              <Empty onSync={() => void library.sync()} />
+              <Empty source={source} onSync={() => void library.sync()} />
             ) : results || view === 'songs' ? (
               <VirtualList
                 items={shown}
@@ -297,6 +324,7 @@ export default function App() {
                     song={s}
                     index={i}
                     playable={canPlay(s)}
+                    playing={nowPlayingId !== null && trackIdOf(s) === nowPlayingId}
                     onPlay={() => void library.play(shown, i)}
                   />
                 )}
@@ -325,7 +353,7 @@ export default function App() {
                     onDoubleClick={() =>
                       void library.playPlaylist(p.id).catch((e) => setProblem(String(e)))
                     }
-                    className="flex h-10 items-center gap-3 border-b border-rule/60 px-4 hover:bg-accent/6"
+                    className="row mx-2 flex h-10 items-center gap-3 px-2"
                     title="Double-click to play"
                   >
                     <Art id={p.id} />
@@ -354,6 +382,7 @@ export default function App() {
         progress={progress}
         storefront={authed?.storefront ?? null}
         engineOk={engineOk}
+        source={source}
       />
     </div>
   )
@@ -363,20 +392,33 @@ function SongLine({
   song,
   index,
   playable,
+  playing,
   onPlay,
 }: {
   song: SongRow
   index: number
   playable: boolean
+  playing: boolean
   onPlay: () => void
 }) {
   return (
     <div
       onDoubleClick={playable ? onPlay : undefined}
-      className={`grid h-10 grid-cols-[28px_36px_1fr_1fr_52px] items-center gap-3 border-b border-rule/60 px-4 ${
-        playable ? 'hover:bg-accent/6' : 'opacity-45'
+      onKeyDown={(e) => {
+        if (playable && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault()
+          onPlay()
+        }
+      }}
+      // Double-click alone left the whole library unreachable without a mouse.
+      role="button"
+      tabIndex={playable ? 0 : -1}
+      aria-disabled={!playable}
+      data-playing={playing}
+      className={`row mx-2 grid h-10 grid-cols-[28px_36px_1fr_1fr_52px] items-center gap-3 px-2 outline-none focus-visible:ring-1 focus-visible:ring-accent ${
+        playable ? '' : 'opacity-40'
       }`}
-      title={playable ? 'Double-click to play' : 'Not playable from this source'}
+      title={playable ? 'Play' : 'Not playable from this source'}
     >
       <span className="data text-[10px] text-muted">
         {String(index + 1).padStart(2, '0')}
@@ -395,7 +437,7 @@ function AlbumLine({ album, onPlay }: { album: AlbumRow; onPlay: () => void }) {
   return (
     <div
       onDoubleClick={onPlay}
-      className="grid h-10 grid-cols-[36px_1fr_1fr_60px] items-center gap-3 border-b border-rule/60 px-4 hover:bg-accent/6"
+      className="row mx-2 grid h-10 grid-cols-[36px_1fr_1fr_60px] items-center gap-3 px-2"
       title="Double-click to play"
     >
       <Art id={album.id} />
@@ -434,10 +476,10 @@ function Tab({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center justify-between rounded-none px-4 py-1.5 text-left transition-colors ${
+      className={`mx-2 flex items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors ${
         active
-          ? 'bg-accent/6 text-ink'
-          : 'border-l-transparent text-muted hover:text-ink'
+          ? 'tab-on bg-[color-mix(in_srgb,var(--color-ink)_9%,transparent)] text-ink'
+          : 'text-muted hover:bg-[color-mix(in_srgb,var(--color-ink)_5%,transparent)] hover:text-ink'
       }`}
     >
       {children}
@@ -449,15 +491,22 @@ function Count({ n }: { n: number }) {
   return <span className="data text-[10px] text-muted">{n}</span>
 }
 
-function Empty({ onSync }: { onSync: () => void }) {
+const SOURCE_NAME: Record<Source, string> = {
+  apple: 'Apple Music',
+  navidrome: 'Navidrome',
+  spotify: 'Spotify',
+  local: 'your folders',
+}
+
+function Empty({ source, onSync }: { source: Source; onSync: () => void }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3">
-      <div className="text-muted">Your library is empty here yet.</div>
+      <div className="text-muted">Nothing here yet.</div>
       <button
         onClick={onSync}
-        className="border border-accent px-3 py-1.5 text-xs text-accent hover:bg-accent/10"
+        className="rounded-md border border-rule px-3 py-1.5 text-xs text-muted transition-colors hover:border-muted hover:text-ink"
       >
-        Sync from Apple Music
+        Sync from {SOURCE_NAME[source]}
       </button>
     </div>
   )

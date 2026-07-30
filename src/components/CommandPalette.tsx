@@ -234,7 +234,7 @@ function Item({
       value={value}
       disabled={disabled}
       onSelect={onSelect}
-      className="flex cursor-pointer items-center gap-2.5 rounded px-2.5 py-2 text-sm text-ink data-[disabled=true]:opacity-35 data-[selected=true]:bg-accent/12 data-[selected=true]:text-ink"
+      className="flex cursor-pointer items-center gap-2.5 rounded px-2.5 py-2 text-sm text-ink data-[disabled=true]:opacity-35 data-[selected=true]:bg-[color-mix(in_srgb,var(--color-ink)_9%,transparent)] data-[selected=true]:text-ink"
     >
       {children}
     </Command.Item>

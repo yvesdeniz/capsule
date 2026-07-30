@@ -1,6 +1,6 @@
 {
   "identifier": "engine-remote",
-  "description": "Narrow IPC surface for the hidden music.apple.com engine webview. Deliberately excludes every player/auth command — the engine reports upward, it never drives the app.",
+  "description": "Narrow IPC surface for the hidden music.apple.com engine webview. Deliberately excludes every player/auth command the engine reports upward, it never drives the app.",
   "windows": ["engine"],
   "webviews": ["engine"],
   "remote": {

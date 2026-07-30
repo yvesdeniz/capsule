@@ -1,7 +1,7 @@
 @import 'tailwindcss';
 
 /* ── Typefaces ────────────────────────────────────────────────────────────
-   Bundled, never fetched — the app must render identically offline.
+   Bundled, never fetched the app must render identically offline.
    The split is the system: Instrument Sans for anything a human wrote,
    Martian Mono for anything a machine measured. You learn to read the mono
    as "this is a fact about the system". */
@@ -26,10 +26,14 @@
   --color-rule: #242c35;
   /* Tuned for a window that stays open all day: nothing here glares. Pure-white
      ink on near-black measured 15.8:1, which is the main source of eye strain at
-     13px — it sits at 12.6:1 now. Hues are unchanged; only intensity dropped.
+     13px it sits at 12.6:1 now. Hues are unchanged; only intensity dropped.
      Every value still clears WCAG AA (4.5:1) on both ground and panel. */
   --color-ink: #ccd3db;
   --color-muted: #78848f;
+  /* Muted, nudged 18% toward ink. Plain muted drops to 4.28:1 on a playing row
+     and 3.75:1 on an active pill both under AA. Measured, not guessed:
+     5.17 / 4.52 / 6.02 on playing row, pill and ground. */
+  --color-muted2: #87929d;
   --color-accent: #9c8fc0;
   --color-ok: #62a688;
   --color-warn: #c09a5f;
@@ -51,30 +55,73 @@ body,
 :root {
   --surface-ground: var(--color-ground);
   --surface-panel: var(--color-panel);
+  /* The well sits below the chrome. Two elevations is what reads as glass; a
+     single flat plane reads as a dark webpage no matter how translucent it is. */
+  --surface-well: var(--color-ground);
+  /* The catch of light along a raised glass edge. Off in solid mode, where
+     there is no depth to catch it. */
+  --glass-edge: none;
+  --radius-surface: 10px;
+  --radius-row: 6px;
 }
 
-/* Chrome is glass; the tracklist is lightly translucent — enough for colour to
+/* Chrome is glass; the tracklist is lightly translucent enough for colour to
    bleed through, opaque enough that dense 13px rows stay readable. The tracklist
    alpha is the one knob that matters; adjust --list-opacity to taste. */
 :root[data-glass='acrylic-chrome'] {
   --surface-ground: transparent;
   --surface-panel: color-mix(in srgb, var(--color-panel) 72%, transparent);
   --list-opacity: 78%;
-}
-:root[data-glass='acrylic-chrome'] .content-surface {
-  background: color-mix(in srgb, var(--color-ground) var(--list-opacity), transparent);
+  --surface-well: color-mix(in srgb, var(--color-ground) var(--list-opacity), transparent);
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.055);
 }
 
 /* Windows 11 Mica tints the whole window subtly from the wallpaper. */
 :root[data-glass='mica'] {
   --surface-ground: transparent;
   --surface-panel: color-mix(in srgb, var(--color-panel) 60%, transparent);
+  --surface-well: color-mix(in srgb, var(--color-ground) 58%, transparent);
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 /* Glass everywhere, including the track list. */
 :root[data-glass='acrylic-all'] {
   --surface-ground: transparent;
   --surface-panel: color-mix(in srgb, var(--color-panel) 55%, transparent);
+  --surface-well: color-mix(in srgb, var(--color-ground) 46%, transparent);
+  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.content-surface {
+  background: var(--surface-well);
+}
+
+/* Raised chrome: header, sidebar, transport. The highlight is the whole tell
+   1px of caught light along the top edge, nothing more. */
+.chrome {
+  background: var(--surface-panel);
+  box-shadow: var(--glass-edge);
+}
+
+/* Rows carry their own shape instead of a hairline each. At 300+ tracks the
+   stacked rules were the loudest thing in the window. */
+.row {
+  border-radius: var(--radius-row);
+  transition: background-color 120ms ease-out;
+}
+.row:hover {
+  background: color-mix(in srgb, var(--color-ink) 5%, transparent);
+}
+.row[data-playing='true'] {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+/* Raised surfaces lift the background under dim text, so dim text lifts too. */
+.row[data-playing='true'] .text-muted,
+.tab-on .text-muted {
+  color: var(--color-muted2);
+}
+.row[data-playing='true']:hover {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
 }
 
 body {
@@ -155,6 +202,27 @@ input[type='range']:disabled {
   cursor: default;
 }
 
+
+/* The player bar is lit from behind by whatever is playing: the artwork itself,
+   scaled up and blurred past recognition, so the glass takes its colour from the
+   music rather than from a fixed accent. Kept at low alpha and desaturated
+   this window stays open all day and the tint must read as warmth, not colour. */
+.backlight {
+  position: absolute;
+  inset: -60% -10%;
+  background-size: cover;
+  background-position: center;
+  filter: blur(52px) saturate(0.85);
+  opacity: 0.22;
+  pointer-events: none;
+  transition: opacity 400ms ease-out;
+}
+.backlight::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent, var(--color-ground) 88%);
+}
 
 @keyframes value-in {
   from {

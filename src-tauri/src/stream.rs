@@ -6,6 +6,7 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 /// How much of a track has landed on disk, and whether the fetch died.
 ///
-/// `available` is always a contiguous prefix from byte zero — sparse-range
+/// `available` is always a contiguous prefix from byte zero - sparse-range
 /// tracking is the nastiest part of a streaming cache, so a seek past the
 /// prefix abandons caching instead (see [`StreamingSource::seek`]).
 #[derive(Debug, Default)]
@@ -36,7 +37,7 @@ impl CacheState {
         self.total
     }
 
-    /// True only once the whole length is known and has arrived — a response
+    /// True only once the whole length is known and has arrived - a response
     /// without Content-Length is never "complete", so readers keep waiting
     /// rather than truncating the track.
     pub fn is_complete(&self) -> bool {
@@ -76,7 +77,7 @@ pub enum StreamError {
     Io(#[from] std::io::Error),
 }
 
-/// Returns a short count at the end of a complete stream — that's EOF, not an
+/// Returns a short count at the end of a complete stream - that's EOF, not an
 /// error. The timeout exists so a stalled server cannot wedge the decoder
 /// thread forever; the caller turns that into a playback error.
 pub fn wait_for(shared: &Shared, want: u64, timeout: Duration) -> Result<u64, StreamError> {
@@ -163,11 +164,76 @@ pub fn prune(dir: &Path, cap_bytes: u64, keep: Option<&Path>) {
 /// prefix; pass 0 for a fresh play.
 ///
 /// The cache file is created synchronously, before the fetch is spawned, so
-/// the caller can open a reader immediately — this runs on the IPC command
+/// the caller can open a reader immediately - this runs on the IPC command
 /// thread and must not block waiting on the response.
-pub fn spawn_fetch(url: String, path: PathBuf, shared: Shared, from: u64) -> std::io::Result<()> {
+/// A complete copy already on disk, if there is one.
+///
+/// Completion is recorded by a sidecar written only after the transfer
+/// finishes, because a `.dat` on its own is indistinguishable from a partial
+/// download that was interrupted - and replaying half a track from cache is
+/// worse than re-fetching it.
+fn cached_len(path: &Path) -> Option<u64> {
+    let marker = path.with_extension("done");
+    let want: u64 = std::fs::read_to_string(&marker).ok()?.trim().parse().ok()?;
+    let have = std::fs::metadata(path).ok()?.len();
+    (have == want && want > 0).then_some(want)
+}
+
+fn mark_complete(path: &Path, len: u64) {
+    let marker = path.with_extension("done");
+    if let Err(e) = std::fs::write(&marker, len.to_string()) {
+        tracing::debug!(error = %e, "could not mark cache entry complete");
+    }
+}
+
+/// A handle that stops a running transfer.
+///
+/// A forward seek starts a second transfer into the same file. Without
+/// cancelling the first, both write the same path at once - and if the original
+/// reaches its own end it writes a completion marker, certifying a corrupted
+/// file that every later play would then trust.
+#[derive(Clone, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn stop(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+    fn stopped(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Begin filling `path` from `url`, reporting progress through `shared`.
+///
+/// `from` is a byte offset for a ranged refetch after a seek outside the
+/// downloaded range; pass 0 for a fresh play, which is also the only case that
+/// may serve or write a cache entry. The file is created synchronously before
+/// the transfer is spawned, because the caller runs on the IPC command thread
+/// and must not wait on the network.
+pub fn spawn_fetch(
+    url: String,
+    path: PathBuf,
+    shared: Shared,
+    from: u64,
+    cancel: Cancel,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+
+    // Serve the cache. Without this the whole cache is write-only: every play
+    // truncated the previous copy and downloaded the track again.
+    if from == 0 {
+        if let Some(len) = cached_len(&path) {
+            tracing::debug!(path = %path.display(), len, "audio cache hit");
+            let mut g = shared.0.lock().expect("cache state mutex");
+            g.set_total(Some(len));
+            g.note_written(len);
+            drop(g);
+            shared.1.notify_all();
+            return Ok(());
+        }
     }
     // The fetch reopens for writing rather than truncating, which on Windows
     // would collide with the reader's handle.
@@ -181,7 +247,17 @@ pub fn spawn_fetch(url: String, path: PathBuf, shared: Shared, from: u64) -> std
             shared.1.notify_all();
         };
 
-        let client = reqwest::Client::new();
+        // No overall timeout: a whole track legitimately takes minutes. The
+        // connect and per-read timeouts are what stop a dead server hanging on
+        // to the task forever.
+        let client = match reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(30))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return finish_err(&shared, "could not start the transfer".into()),
+        };
         let mut req = client.get(&url);
         if from > 0 {
             req = req.header(reqwest::header::RANGE, format!("bytes={from}-"));
@@ -215,6 +291,10 @@ pub fn spawn_fetch(url: String, path: PathBuf, shared: Shared, from: u64) -> std
         loop {
             match resp.chunk().await {
                 Ok(Some(bytes)) => {
+                    if cancel.stopped() {
+                        tracing::debug!("transfer superseded; stopping");
+                        return;
+                    }
                     if let Err(e) = file.write_all(&bytes) {
                         return finish_err(&shared, format!("cache write: {e}"));
                     }
@@ -231,14 +311,22 @@ pub fn spawn_fetch(url: String, path: PathBuf, shared: Shared, from: u64) -> std
 
         // A chunked response has no Content-Length; settling it here is what
         // lets the reader recognise EOF instead of waiting out its timeout.
-        {
+        let landed = {
             let mut g = shared.0.lock().expect("cache state mutex");
             if g.total().is_none() {
-                let landed = g.available();
-                g.set_total(Some(landed));
+                let n = g.available();
+                g.set_total(Some(n));
             }
-        }
+            g.available()
+        };
         shared.1.notify_all();
+
+        // Only a complete, from-zero, uncancelled transfer earns a marker -
+        // anything else is partial or doesn't start at byte zero, and
+        // certifying it would let a later play trust a corrupted file.
+        if from == 0 && !cancel.stopped() {
+            mark_complete(&path, landed);
+        }
     });
     Ok(())
 }
@@ -249,33 +337,95 @@ pub fn spawn_fetch(url: String, path: PathBuf, shared: Shared, from: u64) -> std
 pub struct StreamingSource {
     file: File,
     shared: Shared,
+    path: PathBuf,
+    url: String,
+    /// Absolute byte offset that file position 0 corresponds to. Zero for a
+    /// sequential download; after a refetch, where that transfer started.
+    base: u64,
+    /// Full track length, kept across refetches so `SeekFrom::End` still
+    /// works - a ranged response only reports the bytes remaining.
+    total: Option<u64>,
     pos: u64,
     abandoned: bool,
+    /// Stops whichever transfer is currently writing this file.
+    cancel: Cancel,
 }
 
 impl StreamingSource {
-    pub fn new(path: PathBuf, shared: Shared) -> std::io::Result<Self> {
-        Ok(Self { file: File::open(path)?, shared, pos: 0, abandoned: false })
+    pub fn new(
+        path: PathBuf,
+        shared: Shared,
+        url: String,
+        cancel: Cancel,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            file: File::open(&path)?,
+            shared,
+            path,
+            url,
+            base: 0,
+            total: None,
+            pos: 0,
+            abandoned: false,
+            cancel,
+        })
     }
 
-    /// True once a seek has taken us past the cached prefix; the partial
-    /// file is no longer a faithful copy and must be discarded.
+    /// True once a seek has taken us outside the downloaded range; the file no
+    /// longer starts at byte zero and must not be reused as a cache entry.
     pub fn caching_abandoned(&self) -> bool {
         self.abandoned
+    }
+
+    fn absolute_available(&self) -> u64 {
+        self.base + self.shared.0.lock().expect("cache state mutex").available()
+    }
+
+    fn known_total(&mut self) -> Option<u64> {
+        if self.total.is_none() && self.base == 0 {
+            self.total = self.shared.0.lock().expect("cache state mutex").total();
+        }
+        self.total
+    }
+
+    /// Restart the transfer at `from`.
+    ///
+    /// Without this, seeking forward past the downloaded prefix waits for the
+    /// sequential transfer to reach that point - on a long track that means the
+    /// 20s read timeout and a dead player.
+    fn refetch(&mut self, from: u64) -> std::io::Result<()> {
+        tracing::debug!(from, "seek outside the buffer; refetching");
+        self.cancel.stop();
+        let total = self.known_total();
+        let shared: Shared = Arc::new((Mutex::new(CacheState::new()), Condvar::new()));
+        // The file will no longer start at byte zero, so a completion marker
+        // for it would be a lie.
+        let _ = std::fs::remove_file(self.path.with_extension("done"));
+        let cancel = Cancel::default();
+        spawn_fetch(self.url.clone(), self.path.clone(), shared.clone(), from, cancel.clone())?;
+        self.cancel = cancel;
+        self.file = File::open(&self.path)?;
+        self.shared = shared;
+        self.base = from;
+        self.total = total;
+        self.abandoned = true;
+        Ok(())
     }
 }
 
 impl Read for StreamingSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let want = self.pos + buf.len() as u64;
+        // Positions are absolute; the file only holds bytes from `base` on.
+        let local_pos = self.pos.saturating_sub(self.base);
+        let want = local_pos + buf.len() as u64;
         let available = wait_for(&self.shared, want, READ_TIMEOUT)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        if available <= self.pos {
+        if available <= local_pos {
             return Ok(0); // EOF
         }
-        let can = (available - self.pos).min(buf.len() as u64) as usize;
-        self.file.seek(SeekFrom::Start(self.pos))?;
+        let can = (available - local_pos).min(buf.len() as u64) as usize;
+        self.file.seek(SeekFrom::Start(local_pos))?;
         let n = self.file.read(&mut buf[..can])?;
         self.pos += n as u64;
         Ok(n)
@@ -284,7 +434,7 @@ impl Read for StreamingSource {
 
 impl Seek for StreamingSource {
     fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
-        let total = self.shared.0.lock().expect("cache state mutex").total();
+        let total = self.known_total();
         let target = match from {
             SeekFrom::Start(n) => n,
             SeekFrom::Current(d) => self.pos.saturating_add_signed(d),
@@ -299,11 +449,14 @@ impl Seek for StreamingSource {
             }
         };
 
-        let available = self.shared.0.lock().expect("cache state mutex").available();
-        if target > available {
-            // Past the prefix. Caching this play is over; the caller refetches
-            // from `target` and deletes the partial file.
-            self.abandoned = true;
+        // Outside what this transfer covers - either ahead of the download or
+        // behind where a previous refetch started. Restart the transfer there
+        // rather than waiting for a sequential download that may never reach it.
+        if target < self.base || target > self.absolute_available() {
+            let past_end = total.is_some_and(|t| target >= t);
+            if !past_end {
+                self.refetch(target)?;
+            }
         }
         self.pos = target;
         Ok(target)
@@ -439,7 +592,7 @@ mod tests {
         let p = temp_file("read.dat", b"0123456789");
         let s = shared();
         complete(&s, 10);
-        let mut src = StreamingSource::new(p, s).unwrap();
+        let mut src = StreamingSource::new(p, s, String::new(), Cancel::default()).unwrap();
         let mut buf = [0u8; 4];
         src.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"0123");
@@ -450,7 +603,7 @@ mod tests {
         let p = temp_file("seek-in.dat", b"0123456789");
         let s = shared();
         complete(&s, 10);
-        let mut src = StreamingSource::new(p, s).unwrap();
+        let mut src = StreamingSource::new(p, s, String::new(), Cancel::default()).unwrap();
         assert_eq!(src.seek(SeekFrom::Start(6)).unwrap(), 6);
         let mut buf = [0u8; 2];
         src.read_exact(&mut buf).unwrap();
@@ -467,7 +620,7 @@ mod tests {
             g.set_total(Some(1_000_000));
             g.note_written(5);
         }
-        let mut src = StreamingSource::new(p, s).unwrap();
+        let mut src = StreamingSource::new(p, s, String::new(), Cancel::default()).unwrap();
         src.seek(SeekFrom::Start(900_000)).unwrap();
         assert!(src.caching_abandoned());
     }
@@ -479,7 +632,7 @@ mod tests {
         let p = temp_file("seek-end.dat", b"0123456789");
         let s = shared();
         complete(&s, 10);
-        let mut src = StreamingSource::new(p, s).unwrap();
+        let mut src = StreamingSource::new(p, s, String::new(), Cancel::default()).unwrap();
         assert_eq!(src.seek(SeekFrom::End(-2)).unwrap(), 8);
     }
 
@@ -488,7 +641,7 @@ mod tests {
         let p = temp_file("seek-end-none.dat", b"0123456789");
         let s = shared();
         s.0.lock().unwrap().note_written(10);
-        let mut src = StreamingSource::new(p, s).unwrap();
+        let mut src = StreamingSource::new(p, s, String::new(), Cancel::default()).unwrap();
         assert!(src.seek(SeekFrom::End(-2)).is_err());
     }
 
@@ -522,6 +675,26 @@ mod tests {
     }
 
     #[test]
+    fn a_completed_download_is_reusable() {
+        let p = temp_file("cached.dat", b"0123456789");
+        mark_complete(&p, 10);
+        assert_eq!(cached_len(&p), Some(10));
+    }
+
+    #[test]
+    fn a_partial_download_is_not_reusable() {
+        let p = temp_file("partial.dat", b"01234");
+        assert_eq!(cached_len(&p), None);
+    }
+
+    #[test]
+    fn a_truncated_file_is_rejected_even_with_a_marker() {
+        let p = temp_file("short.dat", b"012");
+        mark_complete(&p, 10);
+        assert_eq!(cached_len(&p), None, "length must match what was recorded");
+    }
+
+    #[test]
     fn prune_does_nothing_below_the_cap() {
         let dir = std::env::temp_dir().join(format!("capsule-prune2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -538,7 +711,7 @@ mod tests {
         let p = temp_file("fail.dat", b"");
         let s = shared();
         s.0.lock().unwrap().fail("server unreachable".into());
-        let mut src = StreamingSource::new(p, s).unwrap();
+        let mut src = StreamingSource::new(p, s, String::new(), Cancel::default()).unwrap();
         let mut buf = [0u8; 4];
         assert!(src.read(&mut buf).is_err());
     }

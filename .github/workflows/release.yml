@@ -1,0 +1,83 @@
+name: Release
+
+# Tag a commit to cut a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+# The release is created as a draft, so nothing is public until you publish it.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+
+    strategy:
+      # One platform failing should still leave you the other's installer.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            label: Windows
+          - platform: ubuntu-22.04
+            label: Linux
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # webkit2gtk is Tauri's webview, libasound2 is what cpal decodes through,
+      # and libdbus is pulled in by souvlaki's MPRIS backend even though the
+      # media-controls module itself is Windows-only.
+      - name: Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            patchelf \
+            file
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: bun install --frozen-lockfile
+
+      # tauri-action runs the beforeBuildCommand from tauri.conf.json, bundles
+      # the installers, and attaches them to the release.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: capsule ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          releaseBody: |
+            ## Downloads
+
+            **Windows** - `.exe` installer. Windows will warn that the
+            publisher is unknown; the build is unsigned. Choose *More info* then
+            *Run anyway*, or build it yourself from source.
+
+            **Linux** - `.deb` or `.AppImage`. Navidrome only: Apple Music needs
+            Widevine, which the Linux webview does not have. The acrylic window
+            material is also Windows-only and falls back to the solid theme.
+
+            Last.fm and Discord Rich Presence are inactive in these builds -
+            they need keys, and shipping keys in a public binary would mean
+            shipping them to everyone. See `.env.example` if you want them.

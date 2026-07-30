@@ -1,7 +1,7 @@
 //! Windows-only frameless-window plumbing.
 //!
 //! `decorations(false)` removes not just the titlebar but the OS's resize
-//! borders and — critically — the maximize button's `HTMAXBUTTON` hit result,
+//! borders and - critically - the maximize button's `HTMAXBUTTON` hit result,
 //! which is what makes the Windows 11 Snap Layouts flyout appear on hover. This
 //! subclass restores both:
 //!

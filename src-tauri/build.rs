@@ -27,6 +27,7 @@ fn main() {
                 "navidrome_connect",
                 "navidrome_status",
                 "dev_load_recent",
+                "dev_diagnostics",
                 "library_songs",
                 "library_albums",
                 "library_playlists",

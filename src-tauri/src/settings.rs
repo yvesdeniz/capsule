@@ -59,10 +59,18 @@ pub struct Lastfm {
 #[serde(default)]
 pub struct Discord {
     pub client_id: String,
+    /// Let Discord fetch cover art straight from your music server.
+    ///
+    /// Off by default, and deliberately so: a signed Subsonic URL is not scoped
+    /// to one endpoint, so anyone who sees it can call the rest of the API with
+    /// the same parameters until the password changes. Putting one in a
+    /// presence payload is a choice worth making knowingly. Also requires the
+    /// server to be reachable from the public internet.
+    pub serve_art_from_server: bool,
 }
 
 /// Window material. Kept as a string rather than an enum so an unrecognised
-/// value degrades to "no glass" instead of invalidating the whole file — a
+/// value degrades to "no glass" instead of invalidating the whole file - a
 /// typo here should not cost the user their settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -81,6 +89,11 @@ impl Default for Appearance {
 pub struct Settings {
     pub source: Source,
     pub onboarded: bool,
+    /// Surfaces diagnostics and engine internals in Settings.
+    ///
+    /// Off by default: these are for filing a bug report or working on
+    /// capsule, and they are noise for everyone else.
+    pub developer: bool,
     pub appearance: Appearance,
     pub navidrome: Navidrome,
     pub local: Local,
@@ -241,7 +254,7 @@ mod tests {
     #[test]
     fn whitespace_is_not_a_key() {
         let s = Settings {
-            discord: Discord { client_id: "   ".into() },
+            discord: Discord { client_id: "   ".into(), ..Discord::default() },
             ..Settings::default()
         };
         assert!(!s.discord_enabled());

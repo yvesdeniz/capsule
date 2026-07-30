@@ -1,7 +1,7 @@
 // Injected into https://music.apple.com, which runs hidden as our audio daemon.
 //
 // DELIBERATELY DUMB. This file is the one part of the system that cannot be
-// unit tested, so it contains no decisions — it marshals MusicKit calls and
+// unit tested, so it contains no decisions it marshals MusicKit calls and
 // events, nothing more. Anything resembling logic belongs in Rust.
 //
 // Injection happens via onPageStarted on remote URLs and is not guaranteed to
@@ -202,7 +202,7 @@
         appendRest(m, mine);
       })
       .catch(function (e) {
-        log('play: FAILED after ' + (Date.now() - t0) + 'ms — ' + String((e && e.message) || e));
+        log('play: FAILED after ' + (Date.now() - t0) + 'ms ' + String((e && e.message) || e));
         emit('error', { op: 'play', message: String((e && e.message) || e) });
       });
   };
@@ -225,7 +225,7 @@
       .then(function () { abortIfClicked(); return m.play(); })
       .then(function () { abortIfClicked(); return m.stop(); })
       .then(function () { log('prewarm: done in ' + (Date.now() - t0) + 'ms'); })
-      .catch(function (e) { log('prewarm: skipped — ' + String((e && e.message) || e)); })
+      .catch(function (e) { log('prewarm: skipped ' + String((e && e.message) || e)); })
       .then(function () {
         saint.__prewarming = false;
         try { m.volume = restore; } catch (e) {}

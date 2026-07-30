@@ -288,6 +288,19 @@ impl Player {
     /// [`Self::on_playback_state`] speaks MusicKit's integer codes, which a
     /// native engine has no business pretending to emit. Without this the
     /// status never leaves `Loading` and the transport looks stuck.
+    /// Forget the queue entirely.
+    ///
+    /// Track ids only mean something to the source that produced them, so a
+    /// queue must not survive a source change - Apple catalog ids handed to a
+    /// Subsonic backend fail every load, while the transport keeps claiming to
+    /// play. Volume, shuffle and repeat are preferences and stay.
+    pub fn reset_queue(&mut self) {
+        self.state.queue.clear();
+        self.state.index = None;
+        self.state.position_ms = 0;
+        self.state.status = Status::Idle;
+    }
+
     pub fn set_status(&mut self, status: Status) {
         self.state.status = status;
     }

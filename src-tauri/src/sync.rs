@@ -2,7 +2,7 @@
 //!
 //! Runs off the UI path entirely: pages stream from Apple straight into SQLite,
 //! and the UI learns about it through events. A sync failing must never leave
-//! the app unusable — the local mirror simply stays as stale as it was.
+//! the app unusable - the local mirror simply stays as stale as it was.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -87,6 +87,14 @@ pub async fn run(app: AppHandle) {
         *app.state::<AppState>().navidrome.lock().expect("navidrome mutex") = Some(shared);
     }
 
+    // The database this sync belongs to. Every write checks it: swapping
+    // source mid-sync must not pour these rows into the new source's file.
+    let generation = app.state::<AppState>().db_generation.load(Ordering::SeqCst);
+    let still_ours = {
+        let app = app.clone();
+        move || app.state::<AppState>().db_generation.load(Ordering::SeqCst) == generation
+    };
+
     let songs = AtomicU32::new(0);
     let albums = AtomicU32::new(0);
     let playlists = AtomicU32::new(0);
@@ -109,6 +117,9 @@ pub async fn run(app: AppHandle) {
             if rows.is_empty() {
                 return;
             }
+            if !still_ours() {
+                return;
+            }
             let state = app.state::<AppState>();
             let written = state.db.lock().expect("db mutex").upsert_songs(&rows);
             match written {
@@ -127,6 +138,9 @@ pub async fn run(app: AppHandle) {
             if rows.is_empty() {
                 return;
             }
+            if !still_ours() {
+                return;
+            }
             let state = app.state::<AppState>();
             let written = state.db.lock().expect("db mutex").upsert_albums(&rows);
             match written {
@@ -143,6 +157,9 @@ pub async fn run(app: AppHandle) {
     let playlists_res = client
         .library_playlists(|rows| {
             if rows.is_empty() {
+                return;
+            }
+            if !still_ours() {
                 return;
             }
             let state = app.state::<AppState>();
@@ -167,6 +184,11 @@ pub async fn run(app: AppHandle) {
             db.playlist_ids().unwrap_or_default()
         };
         for pid in ids {
+            if !still_ours() {
+                tracing::info!("library switched mid-sync; abandoning");
+                drop(lease);
+                return;
+            }
             match nd.playlist_track_ids(&pid).await {
                 Ok(track_ids) => {
                     let state = app.state::<AppState>();
@@ -185,6 +207,9 @@ pub async fn run(app: AppHandle) {
             if rows.is_empty() {
                 return;
             }
+            if !still_ours() {
+                return;
+            }
             let state = app.state::<AppState>();
             let written = state.db.lock().expect("db mutex").upsert_artists(&rows);
             if let Err(e) = written {
@@ -194,6 +219,12 @@ pub async fn run(app: AppHandle) {
         .await;
     if let Err(e) = artists_res {
         tracing::warn!(error = %e, "artist sync failed; continuing");
+    }
+
+    if !still_ours() {
+        tracing::info!("library switched mid-sync; abandoning without marking it complete");
+        drop(lease);
+        return;
     }
 
     emit(&app, &snapshot("done", true));

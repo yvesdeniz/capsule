@@ -3,8 +3,8 @@ name = "capsule"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
-description = "A fast Apple Music desktop client"
-license = "MIT"
+description = "A fast music client for Windows"
+license = "GPL-3.0-only"
 default-run = "capsule"
 
 [lib]
@@ -37,6 +37,7 @@ url = "2"
 http = "1"
 window-vibrancy = "0.6"
 rodio = "0.21.1"
+discord-rich-presence = "1.1.0"
 
 [target.'cfg(windows)'.dependencies]
 # Frameless chrome needs raw Win32: window subclassing to answer WM_NCHITTEST

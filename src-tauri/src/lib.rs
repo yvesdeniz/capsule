@@ -1,4 +1,4 @@
-//! capsule — a fast Apple Music desktop client.
+//! capsule - a fast Apple Music desktop client.
 //!
 //! Rust owns all state. The React UI and the hidden `music.apple.com` engine
 //! window are both just clients of it, which is what keeps the now-playing
@@ -12,7 +12,9 @@ pub mod auth;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod discord;
 pub mod engine;
+pub mod lastfm;
 pub mod lyrics;
 pub mod player;
 pub mod settings;
@@ -34,6 +36,12 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 use player::Player;
 
+#[derive(Default)]
+pub struct NowReported {
+    pub track_id: Option<String>,
+    pub scrobbled: bool,
+}
+
 pub struct AppState {
     pub player: Mutex<Player>,
     pub tokens: Mutex<Option<auth::Tokens>>,
@@ -46,6 +54,17 @@ pub struct AppState {
     /// The native playback engine, present when the active source plays in
     /// Rust. `None` on the Apple path, or when no output device exists.
     pub audio: Mutex<Option<std::sync::Arc<audio::Engine>>>,
+    /// Rich Presence, when a client id is configured.
+    pub discord: Mutex<Option<std::sync::Arc<discord::Presence>>>,
+    /// What was last announced to Discord and the scrobbler, so a 250ms
+    /// publish loop does not re-announce the same track forever.
+    pub now_reported: Mutex<NowReported>,
+    /// Bumped every time the library database is swapped.
+    ///
+    /// A sync captures this when it starts and abandons itself if it changes,
+    /// so a source switch mid-sync cannot write one source's rows into
+    /// another's file.
+    pub db_generation: std::sync::atomic::AtomicU64,
     pub sync: sync::SyncGuard,
     pub login_prompted: AtomicBool,
     pub engine_ready: AtomicBool,
@@ -63,6 +82,9 @@ impl AppState {
             data_dir: Mutex::new(None),
             navidrome: Mutex::new(None),
             audio: Mutex::new(None),
+            discord: Mutex::new(None),
+            now_reported: Mutex::new(NowReported::default()),
+            db_generation: std::sync::atomic::AtomicU64::new(0),
             sync: sync::SyncGuard::default(),
             login_prompted: AtomicBool::new(false),
             engine_ready: AtomicBool::new(false),
@@ -160,6 +182,7 @@ pub fn run() {
             commands::navidrome_connect,
             commands::navidrome_status,
             commands::dev_load_recent,
+            commands::dev_diagnostics,
             commands::engine_ready,
             commands::engine_tokens,
             commands::engine_event,
@@ -186,6 +209,7 @@ pub fn run() {
             // Settings must load before the library: each source keeps its own
             // database file, so `source` decides which one we open.
             let loaded = data_dir.as_ref().map(|d| settings::load(d)).unwrap_or_default();
+            let active_source = loaded.source;
 
             if let Some(dir) = data_dir.as_ref() {
                 // Installs from before per-source files carry library.sqlite3;
@@ -210,24 +234,10 @@ pub fn run() {
             }
             app.manage(AppState::new(database));
 
-            if loaded.source == settings::Source::Navidrome {
-                // Both of these must exist before the first double-click.
-                // Creating them only during a sync leaves a freshly-launched
-                // app silently unable to play or to fetch new artwork.
-                if let Some(client) = source::navidrome_client(&loaded) {
-                    *app.state::<AppState>().navidrome.lock().expect("navidrome mutex") =
-                        Some(std::sync::Arc::new(client));
-                } else {
-                    tracing::warn!("navidrome source with no usable credential");
-                }
-                match audio::Engine::new() {
-                    Ok(e) => {
-                        *app.state::<AppState>().audio.lock().expect("audio mutex") =
-                            Some(std::sync::Arc::new(e));
-                    }
-                    // Not fatal: the library still browses without a device.
-                    Err(e) => tracing::error!(error = %e, "no audio output; playback disabled"),
-                }
+            if loaded.discord_enabled() {
+                let id = loaded.discord_client_id().to_string();
+                *app.state::<AppState>().discord.lock().expect("discord mutex") =
+                    Some(std::sync::Arc::new(discord::Presence::new(id)));
             }
             audio::start_ticker(handle.clone());
 
@@ -308,9 +318,12 @@ pub fn run() {
 
             build_tray(app)?;
 
-            engine::spawn(&handle, runtime.show_engine_window)?;
+            // Only the source that needs it gets a webview. Spawning it
+            // unconditionally cost a second Chromium on music.apple.com during
+            // every native session.
+            commands::reconcile_backend(&handle, active_source);
             if runtime.show_engine_window {
-                tracing::warn!("SHOW_ENGINE_WINDOW is set — engine webview is visible");
+                tracing::warn!("SHOW_ENGINE_WINDOW is set - engine webview is visible");
             }
 
             Ok(())

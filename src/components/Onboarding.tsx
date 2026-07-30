@@ -43,7 +43,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
       on('library://progress', setProgress),
       on('library://updated', () => setStep('lastfm')),
       on('library://failed', (f) =>
-        setProblem(f.needsAuth ? 'Session expired — sign in again.' : `Sync failed: ${f.reason}`),
+        setProblem(f.needsAuth ? 'Session expired - sign in again.' : `Sync failed: ${f.reason}`),
       ),
     ]
     return () => {
@@ -173,14 +173,14 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                   sub={
                     chosen?.ready
                       ? undefined
-                      : 'This source is not playable yet — your settings are saved for when it lands.'
+                      : 'This source is not playable yet - your settings are saved for when it lands.'
                   }
                 />
 
                 {(source === 'apple' || source === 'spotify') && (
                   <p className="mt-4 text-[13px] leading-6 text-muted">
                     Sign-in happens on the service&apos;s own login page, in a window that opens
-                    next. capsule never sees your password — only the tokens the page hands back,
+                    next. capsule never sees your password - only the tokens the page hands back,
                     stored in Windows Credential Manager.
                   </p>
                 )}
@@ -206,7 +206,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                       onEnter={() => void connectNavidrome()}
                     />
                     <p className="text-[11px] leading-5 text-muted">
-                      Checked against your server, then kept in Windows Credential Manager — never
+                      Checked against your server, then kept in Windows Credential Manager - never
                       in the settings file.
                     </p>
                     {draft.navidrome.url.trim().startsWith('http://') && (
@@ -251,7 +251,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                 title="Bringing your library across"
                 body={
                   progress
-                    ? `${progress.stage} — ${progress.songs} songs, ${progress.albums} albums, ${progress.playlists} playlists`
+                    ? `${progress.stage} - ${progress.songs} songs, ${progress.albums} albums, ${progress.playlists} playlists`
                     : 'Starting…'
                 }
                 waiting
@@ -297,7 +297,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                   <Field
                     label="Client ID"
                     value={draft.discord.client_id}
-                    onChange={(v) => edit({ discord: { client_id: v } })}
+                    onChange={(v) => edit({ discord: { ...draft.discord, client_id: v } })}
                   />
                 </div>
                 <Next

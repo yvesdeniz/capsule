@@ -3,7 +3,7 @@
 //! Two mechanisms, deliberately: integration keys are baked in with
 //! `option_env!` so forks supply their own, while debug toggles and path
 //! overrides are read from the environment at runtime so they can be flipped
-//! without a rebuild. Absent values disable a feature — never panic.
+//! without a rebuild. Absent values disable a feature - never panic.
 
 /// Compile-time integration keys. `None` means the feature is simply off.
 pub struct Keys;
@@ -48,7 +48,7 @@ impl Runtime {
 }
 
 /// Navidrome connection from the environment, read via `std::env` rather
-/// than `option_env!` like the integration keys above — changing which
+/// than `option_env!` like the integration keys above - changing which
 /// server you point at must not require a rebuild. Mirrors how
 /// `CAPSULE_DB_PATH` behaves.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +58,7 @@ pub struct NavidromeEnv {
     pub password: String,
 }
 
-/// All three keys, or nothing — a partial set is ignored rather than merged
+/// All three keys, or nothing - a partial set is ignored rather than merged
 /// with stored settings, since pairing a development server URL with
 /// production credentials by accident is worse than not applying the
 /// override at all.
