@@ -216,7 +216,7 @@ is denied at runtime with `not allowed. Command not found`:
 
 ## Getting help
 
-**[Discord](https://discord.gg/DcGha7WNzE)** for questions, setup trouble, and anything
+**[Discord](https://discord.gg/77np9hVV7M)** for questions, setup trouble, and anything
 that is easier to work out in conversation.
 
 **[Issues](https://github.com/yvesdeniz/capsule/issues)** for bugs and feature
