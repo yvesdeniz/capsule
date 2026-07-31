@@ -214,6 +214,23 @@ is denied at runtime with `not allowed. Command not found`:
    permission
 3. the matching `allow-<command>` entry in `src-tauri/capabilities/main.json`
 
+## Getting help
+
+**[Discord](https://discord.gg/DcGha7WNzE)** for questions, setup trouble, and anything
+that is easier to work out in conversation.
+
+**[Issues](https://github.com/yvesdeniz/capsule/issues)** for bugs and feature
+requests, so they do not scroll away.
+
+If you are reporting something broken, turn on **Developer mode** in Settings
+and press **Copy diagnostics**. It reports which source is active, which backend
+is live, your library counts and what the player thinks it is doing. Your server
+address, username and passwords are not included, so it is safe to paste in
+public.
+
+`config.toml` is safe to share too - every secret lives in Windows Credential
+Manager, never in that file.
+
 ## Licence
 
 GPL. See [LICENSE](LICENSE).
