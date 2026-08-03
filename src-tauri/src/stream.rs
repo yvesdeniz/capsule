@@ -382,8 +382,9 @@ impl StreamingSource {
     }
 
     fn known_total(&mut self) -> Option<u64> {
-        if self.total.is_none() && self.base == 0 {
-            self.total = self.shared.0.lock().expect("cache state mutex").total();
+        if self.total.is_none() {
+            let base = self.base;
+            self.total = self.shared.0.lock().expect("cache state mutex").total().map(|t| base + t);
         }
         self.total
     }
