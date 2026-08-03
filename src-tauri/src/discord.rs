@@ -1,15 +1,11 @@
-//! Discord Rich Presence.
-//!
-//! Entirely best-effort: Discord may not be running, may be closed mid-session,
-//! or may never be installed. None of that is allowed to affect playback, so
-//! every failure here is a debug log and a dropped connection.
-
 use std::sync::Mutex;
 
-use discord_rich_presence::activity::{Activity, Assets, Timestamps};
+use discord_rich_presence::activity::{Activity, Assets, Button, Timestamps};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 
 use crate::player::{Status, Track};
+
+const REPO_URL: &str = "https://github.com/yvesdeniz/capsule";
 
 pub struct Presence {
     client: Mutex<Option<DiscordIpcClient>>,
@@ -21,8 +17,6 @@ impl Presence {
         Self { client: Mutex::new(None), app_id }
     }
 
-    /// Connect if we are not already. Returns false when Discord is unreachable,
-    /// which is the normal case when it simply is not running.
     fn ensure(&self, guard: &mut Option<DiscordIpcClient>) -> bool {
         if guard.is_some() {
             return true;
@@ -41,9 +35,6 @@ impl Presence {
         }
     }
 
-    /// Show a track. `image` is a URL Discord's own bot will fetch, so it has to
-    /// be reachable from the public internet - a local path or a private host
-    /// silently renders nothing.
     pub fn show(&self, track: &Track, status: Status, image: Option<&str>) {
         let mut guard = self.client.lock().expect("discord mutex");
         if !self.ensure(&mut guard) {
@@ -51,8 +42,6 @@ impl Presence {
         }
         let Some(client) = guard.as_mut() else { return };
 
-        // Discord requires both details and state to be at least two characters
-        // and rejects the whole payload otherwise.
         let details = pad(&track.title);
         let state = pad(&track.artist);
 
@@ -60,15 +49,17 @@ impl Presence {
         if let Some(url) = image {
             assets = assets.large_image(url);
         }
-        // Padded like the rest: the minimum applies here too.
         let album = pad(&track.album);
         if !track.album.trim().is_empty() {
             assets = assets.large_text(&album);
         }
 
-        let mut activity = Activity::new().details(&details).state(&state).assets(assets);
-        // Only playing tracks get a clock; a paused one showing elapsed time
-        // that never moves looks broken.
+        let mut activity = Activity::new()
+            .details(&details)
+            .state(&state)
+            .assets(assets)
+            .buttons(vec![Button::new("Get capsule", REPO_URL)]);
+
         let started = start_epoch(status, track.duration_ms);
         if let Some(start) = started {
             activity = activity.timestamps(Timestamps::new().start(start));
@@ -90,13 +81,6 @@ impl Presence {
     }
 }
 
-/// Discord rejects any value under two characters - `details`, `state` and
-/// `large_text` alike - and rejects the entire payload, not the field.
-///
-/// Padded with a zero-width space. A plain space - or a non-breaking one -
-/// carries the Unicode `White_Space` property and gets stripped by `trim`,
-/// putting a one-character value straight back under the limit. U+200B does
-/// not, and it is invisible.
 fn pad(s: &str) -> String {
     const ZWSP: char = '\u{200B}';
     if s.trim().is_empty() {

@@ -646,6 +646,20 @@ mod tests {
     }
 
     #[test]
+    fn a_total_learned_after_a_refetch_counts_from_the_start_of_the_file() {
+        let p = temp_file("seek-end-refetch.dat", b"01234");
+        let s = shared();
+        s.0.lock().unwrap().note_written(5);
+        let mut src = StreamingSource::new(p, s, String::new(), Cancel::default()).unwrap();
+
+        src.seek(SeekFrom::Start(900_000)).unwrap();
+        assert_eq!(src.base, 900_000);
+        src.shared.0.lock().unwrap().set_total(Some(100_000));
+
+        assert_eq!(src.seek(SeekFrom::End(-2)).unwrap(), 999_998);
+    }
+
+    #[test]
     fn cache_path_is_stable_and_distinct_per_track() {
         let dir = Path::new(r"C:\cache");
         assert_eq!(cache_path(dir, "tr-1"), cache_path(dir, "tr-1"));

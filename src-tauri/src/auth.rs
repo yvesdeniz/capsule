@@ -1,18 +1,9 @@
-//! Token storage.
-//!
-//! We never see an Apple password: sign-in happens on Apple's own login page
-//! inside the engine window, and we only ever receive the two tokens MusicKit
-//! exposes afterwards. Those go to Windows Credential Manager, not to disk.
 
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 
 const SERVICE: &str = "capsule";
 
-/// Which credential slot in the store.
-///
-/// Each source keeps its own entry, so connecting Navidrome does not destroy a
-/// stored Apple session and switching back does not mean signing in again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     Apple,
@@ -158,6 +149,16 @@ mod tests {
     #[test]
     fn apple_and_navidrome_use_distinct_accounts() {
         assert_ne!(account_for(Slot::Apple), account_for(Slot::Navidrome));
+    }
+
+    #[test]
+    fn the_credential_store_persists_to_disk() {
+        let persistence = keyring::default::default_credential_builder().persistence();
+        assert!(
+            matches!(persistence, keyring::credential::CredentialPersistence::UntilDelete),
+            "keyring has no disk-backed store for this platform; credentials will \
+             not survive, add the backend feature in Cargo.toml"
+        );
     }
 
     #[test]
