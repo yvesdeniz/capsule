@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react'
 import {
   auth,
   library,
-  navidrome as navidromeIpc,
   on,
   settings,
   type AuthStatus,
@@ -11,7 +10,7 @@ import {
   type SyncProgress,
 } from '../lib/ipc'
 import { credentialStore } from '../lib/platform'
-import { Field, Folders, SOURCES } from './fields'
+import { Field, Folders, NavidromeFields, SOURCES, useNavidromeConnect } from './fields'
 import { WindowControls } from './WindowControls'
 
 type Step = 'welcome' | 'source' | 'setup' | 'sync' | 'lastfm' | 'discord' | 'done'
@@ -25,9 +24,8 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
   const [progress, setProgress] = useState<SyncProgress | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
   const [hasLibrary, setHasLibrary] = useState(false)
-  // Held only until connect succeeds, then it lives in the OS credential store.
-  const [password, setPassword] = useState('')
-  const [connecting, setConnecting] = useState(false)
+  const nd = useNavidromeConnect()
+  const { password, setPassword, busy: connecting, error: connectError } = nd
 
   useEffect(() => {
     void settings.get().then(setDraft)
@@ -71,22 +69,11 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
   /// a later save writing the raw input back over it.
   const connectNavidrome = async () => {
     if (!draft) return
-    setConnecting(true)
     setProblem(null)
-    try {
-      await navidromeIpc.connect(
-        draft.navidrome.url.trim(),
-        draft.navidrome.username.trim(),
-        password,
-      )
-      setPassword('')
-      setDraft(await settings.get())
-      setStep('sync')
-    } catch (e) {
-      setProblem(typeof e === 'string' ? e : 'Could not connect')
-    } finally {
-      setConnecting(false)
-    }
+    const { ok, settings: next } = await nd.connect(draft.navidrome.url, draft.navidrome.username)
+    if (!ok) return
+    if (next) setDraft(next)
+    setStep('sync')
   }
 
   const afterSetup = () => {
@@ -191,35 +178,16 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                 )}
 
                 {source === 'navidrome' && (
-                  <div className="mt-4 space-y-3">
-                    <Field
-                      label="Server URL"
-                      placeholder="https://music.example.com"
-                      value={draft.navidrome.url}
-                      onChange={(v) => edit({ navidrome: { ...draft.navidrome, url: v } })}
+                  <div className="mt-4">
+                    <NavidromeFields
+                      url={draft.navidrome.url}
+                      username={draft.navidrome.username}
+                      password={password}
+                      onUrl={(v) => edit({ navidrome: { ...draft.navidrome, url: v } })}
+                      onUsername={(v) => edit({ navidrome: { ...draft.navidrome, username: v } })}
+                      onPassword={setPassword}
+                      onSubmit={() => void connectNavidrome()}
                     />
-                    <Field
-                      label="Username"
-                      value={draft.navidrome.username}
-                      onChange={(v) => edit({ navidrome: { ...draft.navidrome, username: v } })}
-                    />
-                    <Field
-                      label="Password"
-                      type="password"
-                      value={password}
-                      onChange={setPassword}
-                      onEnter={() => void connectNavidrome()}
-                    />
-                    <p className="text-[11px] leading-5 text-muted">
-                      Checked against your server, then kept in {credentialStore()} - never
-                      in the settings file.
-                    </p>
-                    {draft.navidrome.url.trim().startsWith('http://') && (
-                      <p className="text-[11px] leading-5 text-warn">
-                        This connection is not encrypted. Anyone on the network can read your
-                        login.
-                      </p>
-                    )}
                   </div>
                 )}
 
@@ -326,7 +294,9 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
             )}
           </div>
 
-          {problem && <p className="mt-4 text-center text-xs text-crit">{problem}</p>}
+          {(problem ?? connectError) && (
+            <p className="mt-4 text-center text-xs text-crit">{problem ?? connectError}</p>
+          )}
 
           {step !== 'done' && (
             <button

@@ -5,10 +5,18 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { NavidromeConnect } from './NavidromeConnect'
 
 const connect = vi.fn()
+const stored = {
+  source: 'navidrome',
+  navidrome: { url: 'https://m.example.com', username: 'deniz' },
+}
 vi.mock('../lib/ipc', () => ({
   navidrome: {
     connect: (...a: unknown[]) => connect(...a),
     status: () => Promise.resolve({ configured: false, url: '', username: '', insecure: false }),
+  },
+  settings: {
+    get: () => Promise.resolve(stored),
+    set: () => Promise.resolve(),
   },
 }))
 

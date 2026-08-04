@@ -1,14 +1,7 @@
 import { useState } from 'react'
 
-import { navidrome } from '../lib/ipc'
-import { credentialStore } from '../lib/platform'
-import { Field } from './fields'
+import { NavidromeFields, useNavidromeConnect } from './fields'
 
-/**
- * Shown when the source is navidrome but no verified credential exists. The
- * password only travels as far as the Rust side, which pings the server
- * before storing anything in the OS credential store.
- */
 export function NavidromeConnect({
   initialUrl = '',
   initialUsername = '',
@@ -20,25 +13,19 @@ export function NavidromeConnect({
 }) {
   const [url, setUrl] = useState(initialUrl)
   const [username, setUsername] = useState(initialUsername)
-  const [password, setPassword] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { password, setPassword, busy, error, connect } = useNavidromeConnect()
 
-  const insecure = url.trim().startsWith('http://')
   const ready = url.trim() !== '' && username.trim() !== '' && !busy
 
-  async function connect() {
+  async function submit() {
     if (!ready) return
-    setBusy(true)
-    setError(null)
-    try {
-      await navidrome.connect(url.trim(), username.trim(), password)
-      onConnected()
-    } catch (e) {
-      setError(typeof e === 'string' ? e : 'Could not connect')
-    } finally {
-      setBusy(false)
+    const { ok, settings } = await connect(url, username)
+    if (!ok) return
+    if (settings) {
+      setUrl(settings.navidrome.url)
+      setUsername(settings.navidrome.username)
     }
+    onConnected()
   }
 
   return (
@@ -46,42 +33,23 @@ export function NavidromeConnect({
       <div className="w-full max-w-sm">
         <h2 className="text-[13px] text-ink">Connect to Navidrome</h2>
         <p className="mt-1 mb-4 text-[11px] leading-5 text-muted">
-          Your password is verified against the server, then stored in {credentialStore()}
-          - never in the settings file.
+          Your password is verified against the server before anything is stored.
         </p>
 
-        <div className="space-y-3">
-          <Field
-            label="Server URL"
-            placeholder="https://music.example.com"
-            value={url}
-            onChange={setUrl}
-            onEnter={() => void connect()}
-          />
-          <Field
-            label="Username"
-            value={username}
-            onChange={setUsername}
-            onEnter={() => void connect()}
-          />
-          <Field
-            label="Password"
-            type="password"
-            value={password}
-            onChange={setPassword}
-            onEnter={() => void connect()}
-          />
-        </div>
+        <NavidromeFields
+          url={url}
+          username={username}
+          password={password}
+          onUrl={setUrl}
+          onUsername={setUsername}
+          onPassword={setPassword}
+          onSubmit={() => void submit()}
+        />
 
-        {insecure && (
-          <p className="mt-3 text-[11px] leading-5 text-warn">
-            This connection is not encrypted. Anyone on the network can read your login.
-          </p>
-        )}
         {error && <p className="mt-3 text-[11px] leading-5 text-crit">{error}</p>}
 
         <button
-          onClick={() => void connect()}
+          onClick={() => void submit()}
           disabled={!ready}
           className="mt-4 w-full rounded border border-rule px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-rule disabled:hover:text-muted"
         >

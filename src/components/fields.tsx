@@ -1,7 +1,17 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 
-import { navidrome as navidromeIpc, type NavidromeStatus, type Settings, type Source } from '../lib/ipc'
+import {
+  lastfm as lastfmIpc,
+  navidrome as navidromeIpc,
+  on,
+  settings as settingsIpc,
+  type LastfmStatus,
+  type NavidromeStatus,
+  type Settings,
+  type Source,
+} from '../lib/ipc'
+import { isInsecureUrl } from '../lib/navidrome'
 import { credentialStore } from '../lib/platform'
 
 export interface SourceInfo {
@@ -54,6 +64,90 @@ export function Field({
         className="mt-1 w-full rounded border border-rule bg-ground px-2.5 py-1.5 text-xs text-ink outline-none placeholder:text-muted focus:border-muted"
       />
     </label>
+  )
+}
+
+export interface NavidromeConnectResult {
+  ok: boolean
+  settings: Settings | null
+}
+
+export function useNavidromeConnect() {
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const connect = async (url: string, username: string): Promise<NavidromeConnectResult> => {
+    if (busy) return { ok: false, settings: null }
+    setBusy(true)
+    setError(null)
+    try {
+      await navidromeIpc.connect(url.trim(), username.trim(), password)
+      setPassword('')
+    } catch (e) {
+      setError(typeof e === 'string' ? e : 'Could not connect')
+      return { ok: false, settings: null }
+    } finally {
+      setBusy(false)
+    }
+
+    try {
+      return { ok: true, settings: await settingsIpc.get() }
+    } catch {
+      return { ok: true, settings: null }
+    }
+  }
+
+  return { password, setPassword, busy, error, setError, connect }
+}
+
+export function NavidromeFields({
+  url,
+  username,
+  password,
+  onUrl,
+  onUsername,
+  onPassword,
+  onSubmit,
+  passwordPlaceholder,
+}: {
+  url: string
+  username: string
+  password: string
+  onUrl: (v: string) => void
+  onUsername: (v: string) => void
+  onPassword: (v: string) => void
+  onSubmit: () => void
+  passwordPlaceholder?: string
+}) {
+  return (
+    <div className="space-y-3">
+      <Field
+        label="Server URL"
+        placeholder="https://music.example.com"
+        value={url}
+        onChange={onUrl}
+        onEnter={onSubmit}
+      />
+      <Field label="Username" value={username} onChange={onUsername} onEnter={onSubmit} />
+      <Field
+        label="Password"
+        type="password"
+        placeholder={passwordPlaceholder}
+        value={password}
+        onChange={onPassword}
+        onEnter={onSubmit}
+      />
+      {isInsecureUrl(url) && (
+        <p className="text-[11px] leading-5 text-warn">
+          This connection is not encrypted. Anyone on the network can read your login.
+        </p>
+      )}
+      <p className="text-[11px] leading-5 text-muted">
+        The password is checked against your server, then kept in {credentialStore()} - never in
+        the settings file.
+      </p>
+    </div>
   )
 }
 
@@ -162,91 +256,71 @@ function NavidromeSetup({
   draft: Settings
   edit: (patch: Partial<Settings>) => void
 }) {
-  const [password, setPassword] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null)
+  const { password, setPassword, busy, error, setError, connect } = useNavidromeConnect()
+  const [done, setDone] = useState(false)
   const [status, setStatus] = useState<NavidromeStatus | null>(null)
 
   useEffect(() => {
     void navidromeIpc.status().then(setStatus)
   }, [])
 
-  const insecure = draft.navidrome.url.trim().startsWith('http://')
   const ready =
     !busy && draft.navidrome.url.trim() !== '' && draft.navidrome.username.trim() !== ''
 
-  const connect = async () => {
+  const submit = async () => {
     if (!ready) return
-    setBusy(true)
-    setResult(null)
-    try {
-      await navidromeIpc.connect(
-        draft.navidrome.url.trim(),
-        draft.navidrome.username.trim(),
-        password,
-      )
-      setPassword('')
-      setResult({ ok: true, text: 'Connected. Syncing your library…' })
-      void navidromeIpc.status().then(setStatus)
-    } catch (e) {
-      setResult({ ok: false, text: typeof e === 'string' ? e : 'Could not connect' })
-    } finally {
-      setBusy(false)
-    }
+    setDone(false)
+    const { ok, settings } = await connect(draft.navidrome.url, draft.navidrome.username)
+    if (!ok) return
+    if (settings) edit({ navidrome: settings.navidrome })
+    setDone(true)
+    void navidromeIpc.status().then(setStatus)
   }
 
   return (
     <div className="space-y-3">
-      <Field
-        label="Server URL"
-        placeholder="https://music.example.com"
-        value={draft.navidrome.url}
-        onChange={(v) => edit({ navidrome: { ...draft.navidrome, url: v } })}
-      />
-      <Field
-        label="Username"
-        value={draft.navidrome.username}
-        onChange={(v) => edit({ navidrome: { ...draft.navidrome, username: v } })}
-      />
-      <Field
-        label="Password"
-        type="password"
-        placeholder={status?.configured ? 'Stored - enter to change' : ''}
-        value={password}
-        onChange={setPassword}
-        onEnter={() => void connect()}
+      <NavidromeFields
+        url={draft.navidrome.url}
+        username={draft.navidrome.username}
+        password={password}
+        onUrl={(v) => {
+          setError(null)
+          setDone(false)
+          edit({ navidrome: { ...draft.navidrome, url: v } })
+        }}
+        onUsername={(v) => {
+          setError(null)
+          setDone(false)
+          edit({ navidrome: { ...draft.navidrome, username: v } })
+        }}
+        onPassword={setPassword}
+        onSubmit={() => void submit()}
+        passwordPlaceholder={status?.configured ? 'Stored - enter to change' : ''}
       />
 
       <div className="flex items-center gap-3 pt-1">
         <button
-          onClick={() => void connect()}
+          onClick={() => void submit()}
           disabled={!ready}
           className="rounded border border-rule px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-rule disabled:hover:text-muted"
         >
           {busy ? 'Connecting…' : status?.configured ? 'Reconnect' : 'Connect'}
         </button>
-        {status?.configured && !result && (
+        {status?.configured && !done && !error && (
           <span className="label text-muted">connected as {status.username}</span>
         )}
       </div>
 
-      {result && (
-        <p
-          className="text-[11px] leading-5"
-          style={{ color: result.ok ? 'var(--color-ok)' : 'var(--color-crit)' }}
-        >
-          {result.text}
+      {done && (
+        <p className="text-[11px] leading-5" style={{ color: 'var(--color-ok)' }}>
+          Connected. Syncing your library…
         </p>
       )}
-      {insecure && (
-        <p className="text-[11px] leading-5 text-warn">
-          This connection is not encrypted. Anyone on the network can read your login.
+      {error && (
+        <p className="text-[11px] leading-5" style={{ color: 'var(--color-crit)' }}>
+          {error}
         </p>
       )}
-      <p className="text-[11px] leading-5 text-muted">
-        The password is checked against your server, then kept in {credentialStore()} -
-        never in the settings file.
-      </p>
     </div>
   )
 }
@@ -296,6 +370,80 @@ export function LastfmFields({
         value={draft.lastfm.shared_secret}
         onChange={(v) => edit({ lastfm: { ...draft.lastfm, shared_secret: v } })}
       />
+      <LastfmAccount />
+    </div>
+  )
+}
+
+function LastfmAccount() {
+  const [status, setStatus] = useState<LastfmStatus | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+  const [waiting, setWaiting] = useState(false)
+
+  useEffect(() => {
+    void lastfmIpc.status().then(setStatus)
+    const subs = [
+      on('lastfm://linked', (s) => {
+        setStatus(s)
+        setWaiting(false)
+        setNote(null)
+      }),
+      on('lastfm://failed', (reason) => {
+        setWaiting(false)
+        setNote(reason)
+      }),
+    ]
+    return () => {
+      for (const s of subs) void s.then((un) => un())
+    }
+  }, [])
+
+  const link = async () => {
+    setNote(null)
+    setWaiting(true)
+    try {
+      await lastfmIpc.connect()
+    } catch (e) {
+      setWaiting(false)
+      setNote(typeof e === 'string' ? e : 'Could not reach Last.fm')
+    }
+  }
+
+  const unlink = async () => {
+    setNote(null)
+    try {
+      await lastfmIpc.disconnect()
+    } catch (e) {
+      setNote(typeof e === 'string' ? e : 'Could not sign out')
+    }
+  }
+
+  if (!status) return null
+
+  return (
+    <div className="space-y-2 pt-1">
+      <div className="flex items-center gap-3">
+        <button
+          onClick={() => void (status.linked ? unlink() : link())}
+          disabled={!status.configured || waiting}
+          className="rounded border border-rule px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-rule disabled:hover:text-muted"
+        >
+          {status.linked ? 'Sign out' : waiting ? 'Waiting…' : 'Connect account'}
+        </button>
+        {status.linked && status.username && (
+          <span className="label text-muted">scrobbling as {status.username}</span>
+        )}
+      </div>
+      <p className="text-[11px] leading-5 text-muted">
+        {!status.configured
+          ? 'Add a key and secret above, then connect your account.'
+          : status.linked
+            ? 'Plays are sent straight to Last.fm, so local files count too.'
+            : waiting
+              ? 'Approve capsule in the window that just opened.'
+              : 'Without this, only a server that scrobbles for you can report plays.'}
+      </p>
+      {note && <p className="text-[11px] leading-5 text-crit">{note}</p>}
     </div>
   )
 }
