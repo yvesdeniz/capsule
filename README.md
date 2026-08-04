@@ -9,9 +9,9 @@ lists are virtualised.
 
 ![The capsule library view, playing a track](library.png)
 
-> **Status:** early. The first streaming source works end to end roughly
-> **0.8s from double-click to audio** on a warm start. The rest are not built
-> yet. Expect rough edges.
+> **Status:** early. Apple Music, local files and Navidrome work end to end
+> roughly **0.8s from double-click to audio** on a warm start. Spotify is not
+> built yet. Expect rough edges.
 
 ## Sources
 
@@ -19,32 +19,54 @@ One source is active at a time, chosen in `config.toml`.
 
 | Source | State | Notes |
 |---|---|---|
-| **Apple Music** | working only on Windows. | Needs a subscription; 256kbps AAC, no lossless |
-| **Local files** | planned | FLAC/ALAC via `symphonia` no webview, and the only path to real lossless |
-| **Navidrome** | working on both platforms. | Subsonic API; plain HTTP, no DRM, decodes in Rust with no webview |
+| **Apple Music** | working, Windows only | Needs a subscription; 256kbps AAC, no lossless. Widevine is not available in the Linux webview |
+| **Local files** | working on both platforms | Folder scan, tags via `lofty`, FLAC/ALAC via `symphonia` no webview, and the only path to real lossless |
+| **Navidrome** | working on both platforms | Subsonic API; plain HTTP, no DRM, decodes in Rust with no webview |
 | **Spotify** | planned | Requires Premium and their Web Playback SDK, with the same DRM constraints as Apple |
 
-Local files are next, because they share nothing with a streaming source no
-catalog ids, no tokens, no webview which is what forces the playback
-abstraction to be honest rather than shaped around one service.
+Local files and Navidrome share nothing with a streaming source no catalog
+ids, no tokens, no webview which is what forced the playback abstraction to be
+honest rather than shaped around one service.
 
 ## Requirements
 
-- Windows 10/11
+**Windows 10/11**
+
 - WebView2 **Evergreen** runtime (preinstalled on Windows 11). A *fixed-version*
   runtime will fail with an expired Widevine licence
+
+**Linux** (x86_64; built and tested on Ubuntu 22.04)
+
+- `webkit2gtk-4.1` Tauri's webview
+- `libasound2` ALSA, what audio decodes through
+- `libdbus-1` the credential store and MPRIS both speak D-Bus
+- `libayatana-appindicator3` (or `libappindicator3`) system tray
+- A Secret Service provider running gnome-keyring or KWallet. Without one,
+  nothing you sign in to is remembered between launches
+
+The `.deb` pulls these in. For the `.AppImage` install them yourself.
+
+**Both**
+
 - For streaming sources: an **active subscription** to that service without
   one you get 30-second previews
 
+Apple Music is Windows-only: it needs Widevine, which the Linux webview does not
+have. Local files and Navidrome run on both. The acrylic and mica window
+materials are Windows-only too, and fall back to the solid theme.
+
 ## Getting started
 
-There is no published build yet, so you compile it yourself. Beyond the
+There are [published builds](https://github.com/yvesdeniz/capsule/releases), but if you wanna you compile it yourself. Beyond the
 requirements above you need:
 
 - **Rust 1.82+** via [rustup](https://rustup.rs)
 - **Bun** via [bun.sh](https://bun.sh)
-- **MSVC C++ build tools** Tauri links against them on Windows. Installed with
+- **On Windows: MSVC C++ build tools** Tauri links against them. Installed with
   Visual Studio, or standalone with the *Desktop development with C++* workload
+- **On Linux: the `-dev` packages** for the libraries above, plus
+  `build-essential`, `patchelf`, `librsvg2-dev` and `libxdo-dev`. The exact
+  `apt-get` line CI uses is in `.github/workflows/release.yml`
 
 ```bash
 git clone https://github.com/yvesdeniz/capsule.git
@@ -57,14 +79,15 @@ The first compile pulls the whole Rust dependency tree and takes a few minutes.
 Later runs start in seconds. For an installer instead of a dev window:
 
 ```bash
-bun run app:build    # NSIS installer under src-tauri/target/release/bundle/
+bun run app:build    # installer under src-tauri/target/release/bundle/
+                     # NSIS on Windows, .deb and .AppImage on Linux
 ```
 
 ### First run
 
 1. **Sign in.** A window opens on the service's own login page capsule has no
-   login form and never sees your password. Tokens go to Windows Credential
-   Manager. If you dismiss it, **Open sign-in** brings it back.
+   login form and never sees your password. Tokens go to the OS credential
+   store. If you dismiss it, **Open sign-in** brings it back.
 2. **Sync your library.** Press **Sync library** in the sidebar. This mirrors
    catalog metadata into local SQLite and caches artwork to disk; it is the one
    slow step, and it is why later startups don't touch the network.
@@ -73,11 +96,11 @@ bun run app:build    # NSIS installer under src-tauri/target/release/bundle/
 A muted track plays automatically at startup that is deliberate, and the
 reason is under [Honest caveats](#honest-caveats).
 
-Nothing else is required. `config.toml` is written on demand at
-`%APPDATA%\com.deniz.capsule\`, and Last.fm or Discord Rich Presence stay off
-until you supply keys. Those two are read at **compile time**, so copy
-`.env.example` to `.env` and fill it in *before* building changing them later
-means rebuilding.
+Nothing else is required. `config.toml` is written on demand in the data
+directory (see [Configuration](#configuration)), and Last.fm or Discord Rich
+Presence stay off until you supply keys. Those two are read at **compile
+time**, so copy `.env.example` to `.env` and fill it in *before* building
+changing them later means rebuilding.
 
 ## What it does
 
@@ -86,8 +109,9 @@ means rebuilding.
 - **Playback** queue, shuffle, repeat, seek, volume
 - **Lyrics** time-synced, from [LRCLIB](https://lrclib.net), with dots through
   intros and instrumental breaks and a one-time timing calibration
-- **Windows integration** media flyout (SMTC) and hardware media keys, system
-  tray, taskbar thumbnail controls, frameless window with Snap Layouts
+- **Desktop integration** system tray and a frameless window on both platforms.
+  Windows also gets the media flyout (SMTC) and hardware media keys, taskbar
+  thumbnail controls and Snap Layouts
 - **Optional** Last.fm and Discord Rich Presence, once keys are supplied
 
 ## How it works
@@ -115,23 +139,24 @@ directly.
 Local files and Navidrome need none of this they decode in Rust with no
 webview at all, which is why they are also the only routes to lossless.
 
-Because Rust holds the only copy of playback state, the UI, the Windows media
-flyout, the taskbar buttons and the scrobbler can't drift out of sync and a
-new source only has to satisfy that core, not the interface.
+Because Rust holds the only copy of playback state, the UI, the media flyout,
+the taskbar buttons and the scrobbler can't drift out of sync and a new source
+only has to satisfy that core, not the interface.
 
 ## Configuration
 
-Settings live in `config.toml`, next to the library at
-`%APPDATA%\com.deniz.capsule\`. It is created on demand and safe to hand-edit
-a partial file is fine, and anything malformed falls back to defaults rather
-than refusing to start.
+Settings live in `config.toml`, next to the library in the data directory
+`%APPDATA%\com.deniz.capsule\` on Windows, `~/.local/share/com.deniz.capsule/`
+on Linux. It is created on demand and safe to hand-edit a partial file is
+fine, and anything malformed falls back to defaults rather than refusing to
+start.
 
 ```toml
 source = "apple"     # apple | local | navidrome | spotify
 
 [navidrome]
 url = ""             # https://music.example.com
-username = ""        # the password lives in Credential Manager, not here
+username = ""        # the password lives in the OS credential store, not here
 
 [lyrics]
 offset_ms = 0        # timing calibration, set from the lyrics view
@@ -144,8 +169,9 @@ shared_secret = ""
 client_id = ""
 ```
 
-Secrets are never written here. Service tokens and passwords go to Windows
-Credential Manager, so this file is safe to share when reporting a bug.
+Secrets are never written here. Service tokens and passwords go to the OS
+credential store Credential Manager on Windows, Secret Service (gnome-keyring
+or KWallet) on Linux so this file is safe to share when reporting a bug.
 
 ## Honest caveats
 
@@ -157,9 +183,10 @@ negotiates `com.widevine.alpha` for `mp4a.40.2`, and the playback SDK offers
 only 64 and 256. Lossless streams are reserved for first-party clients, which
 binds every third-party player. Lossless comes with local files.
 
-**Memory sits around 1 GB while streaming.** The Rust core is ~70 MB of that;
-the rest is WebView2 and the service's own web app. Sources that need no webview
-won't pay it.
+**Apple Music sits around 1 GB while streaming.** The Rust core is ~70 MB of
+that; the rest is WebView2 and Apple's own web app, which is the price of the
+DRM path. Local files and Navidrome need no webview and sit nearer **200 MB**,
+less once the window is in the tray.
 
 **The default token path is unofficial.** The app reuses the developer token the
 service ships in its own web page. It works, but that bundle can change and
@@ -175,12 +202,12 @@ the SDK rejects an entire queue if any single track fails.
 
 **Your Apple credentials never touch this app.** Sign-in happens on Apple's own
 login page inside the engine window. No login form here, no password seen or
-stored, tokens in Windows Credential Manager.
+stored, tokens in the OS credential store.
 
 **Navidrome is different, and cannot be otherwise.** Subsonic authenticates
 every request with `md5(password + salt)`, so the app has to hold your actual
-password rather than a token derived from it. It goes to Windows Credential
-Manager and never to `config.toml` but it is a real password at rest, and
+password rather than a token derived from it. It goes to the OS credential
+store and never to `config.toml` but it is a real password at rest, and
 over plain `http://` the derived token can be replayed by anyone on the
 network. The connect screen says so when your URL is not HTTPS.
 
@@ -228,8 +255,8 @@ is live, your library counts and what the player thinks it is doing. Your server
 address, username and passwords are not included, so it is safe to paste in
 public.
 
-`config.toml` is safe to share too - every secret lives in Windows Credential
-Manager, never in that file.
+`config.toml` is safe to share too - every secret lives in the OS credential
+store, never in that file.
 
 ## Licence
 

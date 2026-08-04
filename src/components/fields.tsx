@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 
 import { navidrome as navidromeIpc, type NavidromeStatus, type Settings, type Source } from '../lib/ipc'
+import { credentialStore } from '../lib/platform'
 
 export interface SourceInfo {
   id: Source
@@ -152,7 +153,7 @@ export function Folders({
  * Server details plus the password, which is the one field that cannot live in
  * `draft`: settings are written on every keystroke here, and a password must
  * never reach `config.toml`. It goes straight to the connect command, which
- * verifies it against the server before storing it in Credential Manager.
+ * verifies it against the server before storing it in the OS credential store.
  */
 function NavidromeSetup({
   draft,
@@ -243,7 +244,7 @@ function NavidromeSetup({
         </p>
       )}
       <p className="text-[11px] leading-5 text-muted">
-        The password is checked against your server, then kept in Windows Credential Manager -
+        The password is checked against your server, then kept in {credentialStore()} -
         never in the settings file.
       </p>
     </div>
@@ -262,7 +263,7 @@ export function SourceSetup({
     return (
       <p className="text-[13px] leading-6 text-muted">
         Sign-in happens on the service&apos;s own login page. capsule never sees your password -
-        only the tokens the page hands back, stored in Windows Credential Manager.
+        only the tokens the page hands back, stored in {credentialStore()}.
       </p>
     )
   }

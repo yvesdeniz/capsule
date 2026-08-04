@@ -3,7 +3,7 @@ name = "capsule"
 version = "0.3.0"
 edition = "2021"
 rust-version = "1.82"
-description = "A fast music client for Windows"
+description = "A fast music client for Windows and Linux"
 license = "GPL-3.0-only"
 default-run = "capsule"
 

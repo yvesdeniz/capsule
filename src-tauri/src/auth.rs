@@ -70,8 +70,8 @@ pub fn clear() -> Result<(), AuthError> {
 
 /// Navidrome's Subsonic token auth computes `md5(password + salt)` per request,
 /// so unlike the Apple path we must hold the password itself rather than a
-/// token derived from it. It lives in Windows Credential Manager, never in
-/// `config.toml`.
+/// token derived from it. It lives in the OS credential store - Credential
+/// Manager on Windows, Secret Service on Linux - never in `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NavidromeCredentials {
     pub password: String,

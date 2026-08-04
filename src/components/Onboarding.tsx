@@ -10,6 +10,7 @@ import {
   type Settings,
   type SyncProgress,
 } from '../lib/ipc'
+import { credentialStore } from '../lib/platform'
 import { Field, Folders, SOURCES } from './fields'
 import { WindowControls } from './WindowControls'
 
@@ -24,7 +25,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
   const [progress, setProgress] = useState<SyncProgress | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
   const [hasLibrary, setHasLibrary] = useState(false)
-  // Held only until connect succeeds, then it lives in Credential Manager.
+  // Held only until connect succeeds, then it lives in the OS credential store.
   const [password, setPassword] = useState('')
   const [connecting, setConnecting] = useState(false)
 
@@ -138,7 +139,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
             {step === 'welcome' && (
               <Panel
                 title="capsule"
-                body="A fast music player for Windows. Your library is mirrored locally, so browsing never waits on the network."
+                body="A fast music player. Your library is mirrored locally, so browsing never waits on the network."
                 action="Get started"
                 onAction={() => setStep('source')}
               />
@@ -185,7 +186,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                   <p className="mt-4 text-[13px] leading-6 text-muted">
                     Sign-in happens on the service&apos;s own login page, in a window that opens
                     next. capsule never sees your password - only the tokens the page hands back,
-                    stored in Windows Credential Manager.
+                    stored in {credentialStore()}.
                   </p>
                 )}
 
@@ -210,7 +211,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                       onEnter={() => void connectNavidrome()}
                     />
                     <p className="text-[11px] leading-5 text-muted">
-                      Checked against your server, then kept in Windows Credential Manager - never
+                      Checked against your server, then kept in {credentialStore()} - never
                       in the settings file.
                     </p>
                     {draft.navidrome.url.trim().startsWith('http://') && (

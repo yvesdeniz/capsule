@@ -1,12 +1,13 @@
 import { useState } from 'react'
 
 import { navidrome } from '../lib/ipc'
+import { credentialStore } from '../lib/platform'
 import { Field } from './fields'
 
 /**
  * Shown when the source is navidrome but no verified credential exists. The
  * password only travels as far as the Rust side, which pings the server
- * before storing anything in Windows Credential Manager.
+ * before storing anything in the OS credential store.
  */
 export function NavidromeConnect({
   initialUrl = '',
@@ -45,7 +46,7 @@ export function NavidromeConnect({
       <div className="w-full max-w-sm">
         <h2 className="text-[13px] text-ink">Connect to Navidrome</h2>
         <p className="mt-1 mb-4 text-[11px] leading-5 text-muted">
-          Your password is verified against the server, then stored in Windows Credential Manager
+          Your password is verified against the server, then stored in {credentialStore()}
           - never in the settings file.
         </p>
 

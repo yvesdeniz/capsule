@@ -1,4 +1,4 @@
-//! capsule - a fast music client for Windows.
+//! capsule - a fast music client for Windows and Linux.
 //!
 //! Rust owns all state. The React UI, the hidden `music.apple.com` engine
 //! window, and the native decoder are all just clients of it, which is what

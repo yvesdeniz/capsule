@@ -77,9 +77,11 @@ jobs:
             publisher is unknown; the build is unsigned. Choose *More info* then
             *Run anyway*, or build it yourself from source.
 
-            **Linux** - `.deb` or `.AppImage`. Navidrome only: Apple Music needs
-            Widevine, which the Linux webview does not have. The acrylic window
-            material is also Windows-only and falls back to the solid theme.
+            **Linux** - `.deb` or `.AppImage`. Local files and Navidrome only:
+            Apple Music needs Widevine, which the Linux webview does not have.
+            The acrylic window material is also Windows-only and falls back to
+            the solid theme. The `.AppImage` needs webkit2gtk-4.1, libasound2,
+            libdbus-1 and a running keyring; the `.deb` pulls those in.
 
             Last.fm and Discord Rich Presence are inactive in these builds -
             they need keys, and shipping keys in a public binary would mean

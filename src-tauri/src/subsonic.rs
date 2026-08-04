@@ -2,7 +2,7 @@
 //!
 //! Auth is Subsonic's salted-token scheme - `md5(password + salt)` - mandated
 //! by the protocol, not a security choice of ours. The plaintext password is
-//! needed at call time, so it lives in Windows Credential Manager
+//! needed at call time, so it lives in the OS credential store
 //! ([`crate::auth`]), never on disk in `config.toml`.
 
 use serde::Deserialize;

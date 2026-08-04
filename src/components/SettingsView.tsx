@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { auth, dev, library, settings, type Settings } from '../lib/ipc'
+import { dataDir } from '../lib/platform'
 import {
   Cards,
   DiscordFields,
@@ -105,7 +106,7 @@ export function SettingsView() {
           <DiscordFields draft={draft} edit={edit} />
         </Section>
 
-        <Section title="Library" sub="Your data lives in %APPDATA%\com.deniz.capsule.">
+        <Section title="Library" sub={`Your data lives in ${dataDir()}.`}>
           <div className="flex flex-wrap gap-2">
             <Action
               label="Sync now"
