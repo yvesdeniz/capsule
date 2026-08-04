@@ -8,12 +8,14 @@ const SERVICE: &str = "capsule";
 pub enum Slot {
     Apple,
     Navidrome,
+    Lastfm,
 }
 
 fn account_for(slot: Slot) -> &'static str {
     match slot {
         Slot::Apple => "apple-music-tokens",
         Slot::Navidrome => "navidrome-credentials",
+        Slot::Lastfm => "lastfm-session",
     }
 }
 
@@ -93,6 +95,27 @@ pub fn load_navidrome() -> Result<Option<NavidromeCredentials>, AuthError> {
 
 pub fn clear_navidrome() -> Result<(), AuthError> {
     match entry_for(Slot::Navidrome)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(AuthError::Store(e)),
+    }
+}
+
+pub fn save_lastfm(session: &crate::lastfm::Session) -> Result<(), AuthError> {
+    let json = serde_json::to_string(session)?;
+    entry_for(Slot::Lastfm)?.set_password(&json)?;
+    Ok(())
+}
+
+pub fn load_lastfm() -> Result<Option<crate::lastfm::Session>, AuthError> {
+    match entry_for(Slot::Lastfm)?.get_password() {
+        Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(AuthError::Store(e)),
+    }
+}
+
+pub fn clear_lastfm() -> Result<(), AuthError> {
+    match entry_for(Slot::Lastfm)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(AuthError::Store(e)),
     }

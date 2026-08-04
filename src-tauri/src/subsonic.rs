@@ -560,48 +560,9 @@ pub fn parse_envelope<T: serde::de::DeserializeOwned>(
     serde_json::from_value(payload).map_err(|e| SubsonicError::Malformed(e.to_string()))
 }
 
-/// Last.fm's own rule, which Navidrome forwards under: a play counts once it
-/// passes halfway or four minutes, whichever comes first, and tracks under
-/// 30 seconds never count.
-pub fn scrobble_due(position_ms: u64, duration_ms: u64) -> bool {
-    const MIN_TRACK_MS: u64 = 30_000;
-    const ALWAYS_AT_MS: u64 = 4 * 60 * 1000;
-    if duration_ms < MIN_TRACK_MS {
-        return false;
-    }
-    position_ms >= (duration_ms / 2).min(ALWAYS_AT_MS)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_play_counts_at_the_halfway_mark() {
-        let three_min = 180_000;
-        assert!(!scrobble_due(89_000, three_min));
-        assert!(scrobble_due(90_000, three_min));
-    }
-
-    #[test]
-    fn long_tracks_count_at_four_minutes_not_halfway() {
-        // A 20-minute mix should not need 10 minutes to register.
-        let twenty_min = 1_200_000;
-        assert!(!scrobble_due(239_000, twenty_min));
-        assert!(scrobble_due(240_000, twenty_min));
-    }
-
-    #[test]
-    fn tracks_under_thirty_seconds_never_count() {
-        assert!(!scrobble_due(29_000, 29_000));
-        assert!(!scrobble_due(1_000_000, 12_000));
-    }
-
-    #[test]
-    fn a_track_of_unknown_length_never_counts() {
-        // duration 0 means we never learned it; guessing would invent plays.
-        assert!(!scrobble_due(500_000, 0));
-    }
 
     #[derive(Debug, serde::Deserialize, PartialEq)]
     struct Pong {}

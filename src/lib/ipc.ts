@@ -98,6 +98,18 @@ export const navidrome = {
     invoke<void>('navidrome_connect', { url, username, password }),
 }
 
+export interface LastfmStatus {
+  configured: boolean
+  linked: boolean
+  username: string | null
+}
+
+export const lastfm = {
+  status: () => invoke<LastfmStatus>('lastfm_status'),
+  connect: () => invoke<void>('lastfm_connect'),
+  disconnect: () => invoke<void>('lastfm_disconnect'),
+}
+
 export interface SongRow {
   id: string
   catalog_id: string | null
@@ -179,6 +191,8 @@ type Events = {
   'library://updated': LibraryCounts
   'library://failed': SyncFailed
   'playback://error': string
+  'lastfm://linked': LastfmStatus
+  'lastfm://failed': string
 }
 
 export function on<K extends keyof Events>(

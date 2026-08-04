@@ -1,19 +1,19 @@
-//! Windows System Media Transport Controls - the media flyout that shows the
-//! current track with prev / play-pause / next, and receives hardware media
-//! keys.
+//! OS media controls: the Windows SMTC flyout and the Linux MPRIS interface.
 //!
-//! Two hazards this module is built around:
+//! Both give the desktop a now-playing card and route hardware media keys back
+//! to the player.
+//!
+//! Two hazards this module is built around, both Windows-only:
 //!
 //! - The SMTC COM object is apartment-threaded and **not `Send`**. It is created
 //!   on the main thread, its button callback is delivered via the main window's
 //!   WndProc (main thread), and every update is funnelled back to the main
 //!   thread with `run_on_main_thread`. The `unsafe impl Send` is sound only
-//!   because of that discipline.
+//!   because of that discipline. The MPRIS backend is a channel to its own
+//!   thread and needs none of it.
 //! - souvlaki subclasses the main window to receive SMTC messages, and so does
 //!   [`crate::snap`]. Install snap *first* so souvlaki's `SetWindowSubclass`
 //!   chains on top of it; both then see their messages.
-
-#![cfg(target_os = "windows")]
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -28,49 +28,59 @@ use crate::AppState;
 
 struct Controls(MediaControls);
 // SAFETY: see the module docs - only ever touched on the main thread.
+#[cfg(target_os = "windows")]
 unsafe impl Send for Controls {}
 
 #[derive(Default)]
-pub struct Smtc {
+pub struct Handle {
     inner: Mutex<Option<Controls>>,
 }
 
-impl Smtc {
+impl Handle {
     pub fn init(&self, app: &AppHandle) {
-        let Some(win) = app.get_webview_window("main") else {
-            return;
+        #[cfg(target_os = "windows")]
+        let hwnd = {
+            let Some(win) = app.get_webview_window("main") else {
+                return;
+            };
+            match win.hwnd() {
+                Ok(h) => Some(h.0),
+                Err(_) => {
+                    tracing::warn!("no HWND; media controls unavailable");
+                    return;
+                }
+            }
         };
-        let Ok(hwnd) = win.hwnd() else {
-            tracing::warn!("no HWND; SMTC unavailable");
-            return;
-        };
+        #[cfg(not(target_os = "windows"))]
+        let hwnd: Option<*mut std::ffi::c_void> = None;
 
-        let config = PlatformConfig {
-            dbus_name: "capsule",
-            display_name: "capsule",
-            hwnd: Some(hwnd.0),
-        };
+        let config =
+            PlatformConfig { dbus_name: "capsule", display_name: "capsule", hwnd };
 
         let mut controls = match MediaControls::new(config) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = ?e, "SMTC init failed");
+                tracing::warn!(error = ?e, "media controls init failed");
                 return;
             }
         };
 
         let handle = app.clone();
         if let Err(e) = controls.attach(move |event| on_event(&handle, event)) {
-            tracing::warn!(error = ?e, "SMTC attach failed");
+            tracing::warn!(error = ?e, "media controls attach failed");
             return;
         }
 
-        *self.inner.lock().expect("smtc mutex") = Some(Controls(controls));
-        tracing::info!("SMTC attached");
+        let mut guard = self.inner.lock().expect("media controls mutex");
+        if let Some(Controls(old)) = guard.as_mut() {
+            let _ = old.detach();
+        }
+        *guard = Some(Controls(controls));
+        tracing::info!("media controls attached");
     }
 
     fn apply(&self, m: &Applied) {
-        let mut guard = self.inner.lock().expect("smtc mutex");
+        let mut guard = self.inner.lock().expect("media controls mutex");
         let Some(Controls(controls)) = guard.as_mut() else {
             return;
         };
@@ -119,7 +129,7 @@ pub fn update(app: &AppHandle, snapshot: &PlayerState) {
 
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
-        app.state::<AppState>().smtc.apply(&applied);
+        app.state::<AppState>().media_controls.apply(&applied);
     });
 }
 
@@ -139,6 +149,6 @@ fn on_event(app: &AppHandle, event: MediaControlEvent) {
         MediaControlEvent::Next => apply(app, |p| p.next_track()),
         MediaControlEvent::Previous => apply(app, |p| p.previous_track()),
         MediaControlEvent::Stop => apply(app, |p| p.pause()),
-        other => tracing::debug!(?other, "unhandled SMTC event"),
+        other => tracing::debug!(?other, "unhandled media control event"),
     }
 }
