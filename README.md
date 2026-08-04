@@ -44,6 +44,9 @@ honest rather than shaped around one service.
 - A Secret Service provider running gnome-keyring or KWallet. Without one,
   nothing you sign in to is remembered between launches
 
+Media keys come from MPRIS, which your desktop routes over the same session bus
+as the credential store. GNOME and KDE both do this out of the box.
+
 The `.deb` pulls these in. For the `.AppImage` install them yourself.
 
 **Both**
@@ -109,10 +112,11 @@ changing them later means rebuilding.
 - **Playback** queue, shuffle, repeat, seek, volume
 - **Lyrics** time-synced, from [LRCLIB](https://lrclib.net), with dots through
   intros and instrumental breaks and a one-time timing calibration
-- **Desktop integration** system tray and a frameless window on both platforms.
-  Windows also gets the media flyout (SMTC) and hardware media keys, taskbar
-  thumbnail controls and Snap Layouts
-- **Optional** Last.fm and Discord Rich Presence, once keys are supplied
+- **Desktop integration** system tray, a frameless window, and hardware media
+  keys with a now-playing card on both platforms via SMTC on Windows and
+  MPRIS on Linux. Windows also gets taskbar thumbnail controls and Snap Layouts
+- **Optional** Last.fm scrobbling and Discord Rich Presence, once keys are
+  supplied
 
 ## How it works
 
@@ -163,7 +167,7 @@ offset_ms = 0        # timing calibration, set from the lyrics view
 
 [lastfm]
 api_key = ""         # register an application at last.fm/api
-shared_secret = ""
+shared_secret = ""   # the session key lives in the credential store, not here
 
 [discord]
 client_id = ""
@@ -203,6 +207,13 @@ the SDK rejects an entire queue if any single track fails.
 **Your Apple credentials never touch this app.** Sign-in happens on Apple's own
 login page inside the engine window. No login form here, no password seen or
 stored, tokens in the OS credential store.
+
+**Scrobbling takes one route, never two.** Connect your Last.fm account in
+Settings and every source reports plays directly, local files included. Without
+it, only a server that scrobbles on your behalf can report anything - which is
+why local files used to count for nothing. When a Last.fm account is linked
+capsule stops asking Navidrome to forward plays, because two routes to the same
+account would count every play twice.
 
 **Navidrome is different, and cannot be otherwise.** Subsonic authenticates
 every request with `md5(password + salt)`, so the app has to hold your actual
