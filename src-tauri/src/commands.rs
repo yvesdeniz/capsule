@@ -138,11 +138,9 @@ pub(crate) fn publish(app: &AppHandle, state: &AppState) {
     if let Err(e) = app.emit("player://state", &snapshot) {
         tracing::warn!(error = %e, "failed to emit player state");
     }
+    crate::media_controls::update(app, &snapshot);
     #[cfg(target_os = "windows")]
-    {
-        crate::smtc::update(app, &snapshot);
-        crate::thumbbar::refresh(app, snapshot.status);
-    }
+    crate::thumbbar::refresh(app, snapshot.status);
     report_now_playing(app, state, &snapshot);
 }
 
@@ -178,20 +176,57 @@ fn report_now_playing(app: &AppHandle, state: &AppState, snapshot: &PlayerState)
     if changed {
         last.track_id = Some(track.id.clone());
         last.scrobbled = false;
-        scrobble(app, track.id.clone(), false);
+        scrobble(app, &track, snapshot.position_ms, false);
         present(app, track.clone(), snapshot.status);
     }
-    if !last.scrobbled && crate::subsonic::scrobble_due(snapshot.position_ms, track.duration_ms) {
+    if !last.scrobbled && crate::lastfm::scrobble_due(snapshot.position_ms, track.duration_ms) {
         last.scrobbled = true;
-        scrobble(app, track.id.clone(), true);
+        scrobble(app, &track, snapshot.position_ms, true);
     }
 }
 
-/// Report a play to the server, which forwards it to whatever the user linked
-/// there. Only sources with a server that scrobbles have a client here.
-fn scrobble(app: &AppHandle, track_id: String, submission: bool) {
-    let client = { app.state::<AppState>().navidrome.lock().expect("navidrome mutex").clone() };
+/// Report a play, either straight to Last.fm or through a server that forwards
+/// it. Never both: two routes to the same account would count every play twice.
+fn scrobble(app: &AppHandle, track: &Track, position_ms: u64, submission: bool) {
+    let state = app.state::<AppState>();
+
+    let session = { state.lastfm.lock().expect("lastfm mutex").clone() };
+    if let Some(session) = session {
+        let track = track.clone();
+        let started = crate::lastfm::started_at(crate::lastfm::now_unix(), position_ms);
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let (api_key, shared_secret) = {
+                let s = app.state::<AppState>();
+                let s = s.settings.lock().expect("settings mutex");
+                (s.api_key().to_string(), s.shared_secret().to_string())
+            };
+            let http = reqwest::Client::new();
+            let auth = crate::lastfm::Auth {
+                api_key: &api_key,
+                shared_secret: &shared_secret,
+                session_key: &session.key,
+            };
+            let play = crate::lastfm::Play {
+                artist: &track.artist,
+                title: &track.title,
+                album: &track.album,
+            };
+            let result = if submission {
+                crate::lastfm::scrobble(&http, auth, play, started).await
+            } else {
+                crate::lastfm::update_now_playing(&http, auth, play).await
+            };
+            if let Err(e) = result {
+                tracing::debug!(error = %e, title = %track.title, submission, "last.fm scrobble rejected");
+            }
+        });
+        return;
+    }
+
+    let client = { state.navidrome.lock().expect("navidrome mutex").clone() };
     let Some(client) = client else { return };
+    let track_id = track.id.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = client.scrobble(&track_id, submission).await {
             tracing::debug!(error = %e, %track_id, submission, "scrobble rejected");
@@ -955,6 +990,118 @@ pub async fn navidrome_connect(
 
     let handle = app.clone();
     tauri::async_runtime::spawn(async move { sync::run(handle).await });
+    Ok(())
+}
+
+const LASTFM_AUTH_WINDOW: &str = "lastfm-auth";
+
+fn close_lastfm_window(app: &AppHandle) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(w) = app.get_webview_window(LASTFM_AUTH_WINDOW) {
+            let _ = w.close();
+        }
+    });
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastfmStatus {
+    pub configured: bool,
+    pub linked: bool,
+    pub username: Option<String>,
+}
+
+#[tauri::command]
+pub fn lastfm_status(state: State<'_, AppState>) -> LastfmStatus {
+    let configured = state.settings.lock().expect("settings mutex").lastfm_enabled();
+    let session = state.lastfm.lock().expect("lastfm mutex").clone();
+    LastfmStatus {
+        configured,
+        linked: session.is_some(),
+        username: session.map(|s| s.username),
+    }
+}
+
+/// Open Last.fm's own authorisation page, then wait for the user to approve.
+///
+/// `auth.getSession` refuses until the token is authorised, so polling it is
+/// how the desktop flow is meant to detect approval - there is no callback to
+/// a desktop app.
+#[tauri::command]
+pub async fn lastfm_connect(app: AppHandle) -> Result<(), String> {
+    let (api_key, shared_secret) = {
+        let state = app.state::<AppState>();
+        let s = state.settings.lock().expect("settings mutex");
+        (s.api_key().to_string(), s.shared_secret().to_string())
+    };
+    if api_key.trim().is_empty() || shared_secret.trim().is_empty() {
+        return Err("add a Last.fm api key and shared secret first".to_string());
+    }
+
+    let http = reqwest::Client::new();
+    let token = crate::lastfm::request_token(&http, &api_key, &shared_secret)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let url = crate::lastfm::authorize_url(&api_key, &token);
+    let parsed: url::Url =
+        url.parse().map_err(|_| "could not build the sign-in url".to_string())?;
+
+    let opener = app.clone();
+    app.run_on_main_thread(move || {
+        let built = tauri::WebviewWindowBuilder::new(
+            &opener,
+            LASTFM_AUTH_WINDOW,
+            tauri::WebviewUrl::External(parsed),
+        )
+        .title("Authorise capsule on Last.fm")
+        .inner_size(560.0, 760.0)
+        .build();
+        if let Err(e) = built {
+            tracing::error!(error = %e, "could not open the last.fm sign-in window");
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    tauri::async_runtime::spawn(async move {
+        for _ in 0..90 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            match crate::lastfm::fetch_session(&http, &api_key, &shared_secret, &token).await {
+                Ok(session) => {
+                    if let Err(e) = auth::save_lastfm(&session) {
+                        tracing::warn!(error = %e, "could not store the last.fm session");
+                    }
+                    {
+                        let state = app.state::<AppState>();
+                        *state.lastfm.lock().expect("lastfm mutex") = Some(session);
+                        let _ = app.emit("lastfm://linked", lastfm_status(state));
+                    }
+                    close_lastfm_window(&app);
+                    return;
+                }
+                Err(crate::lastfm::LastfmError::NotAuthorized) => continue,
+                Err(e) => {
+                    tracing::warn!(error = %e, "last.fm authorisation failed");
+                    close_lastfm_window(&app);
+                    let _ = app.emit("lastfm://failed", e.to_string());
+                    return;
+                }
+            }
+        }
+        close_lastfm_window(&app);
+        let _ = app.emit("lastfm://failed", "timed out waiting for authorisation".to_string());
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn lastfm_disconnect(app: AppHandle) -> Result<(), String> {
+    auth::clear_lastfm().map_err(|e| e.to_string())?;
+    let state = app.state::<AppState>();
+    *state.lastfm.lock().expect("lastfm mutex") = None;
+    let _ = app.emit("lastfm://linked", lastfm_status(state));
     Ok(())
 }
 

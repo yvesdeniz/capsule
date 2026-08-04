@@ -17,13 +17,12 @@ pub mod engine;
 pub mod lastfm;
 pub mod local;
 pub mod lyrics;
+pub mod media_controls;
 pub mod player;
 pub mod settings;
 pub mod source;
 pub mod stream;
 pub mod subsonic;
-#[cfg(target_os = "windows")]
-pub mod smtc;
 #[cfg(target_os = "windows")]
 pub mod snap;
 #[cfg(target_os = "windows")]
@@ -57,6 +56,8 @@ pub struct AppState {
     pub audio: Mutex<Option<std::sync::Arc<audio::Engine>>>,
     /// Rich Presence, when a client id is configured.
     pub discord: Mutex<Option<std::sync::Arc<discord::Presence>>>,
+    /// The Last.fm session, when the user has linked their account.
+    pub lastfm: Mutex<Option<lastfm::Session>>,
     /// What was last announced to Discord and the scrobbler, so a 250ms
     /// publish loop does not re-announce the same track forever.
     pub now_reported: Mutex<NowReported>,
@@ -69,8 +70,7 @@ pub struct AppState {
     pub sync: sync::SyncGuard,
     pub login_prompted: AtomicBool,
     pub engine_ready: AtomicBool,
-    #[cfg(target_os = "windows")]
-    pub smtc: smtc::Smtc,
+    pub media_controls: media_controls::Handle,
 }
 
 impl AppState {
@@ -84,13 +84,13 @@ impl AppState {
             navidrome: Mutex::new(None),
             audio: Mutex::new(None),
             discord: Mutex::new(None),
+            lastfm: Mutex::new(None),
             now_reported: Mutex::new(NowReported::default()),
             db_generation: std::sync::atomic::AtomicU64::new(0),
             sync: sync::SyncGuard::default(),
             login_prompted: AtomicBool::new(false),
             engine_ready: AtomicBool::new(false),
-            #[cfg(target_os = "windows")]
-            smtc: smtc::Smtc::default(),
+            media_controls: media_controls::Handle::default(),
         }
     }
 }
@@ -204,8 +204,9 @@ fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
 
         snap::install(&main);
         thumbbar::install(&main, app);
-        app.state::<AppState>().smtc.init(app);
     }
+
+    app.state::<AppState>().media_controls.init(app);
 
     Ok(())
 }
@@ -256,6 +257,9 @@ pub fn run() {
             commands::auth_show_login,
             commands::navidrome_connect,
             commands::navidrome_status,
+            commands::lastfm_status,
+            commands::lastfm_connect,
+            commands::lastfm_disconnect,
             commands::dev_load_recent,
             commands::dev_diagnostics,
             commands::engine_ready,
@@ -337,6 +341,15 @@ pub fn run() {
                 }
                 Ok(_) => tracing::info!("no stored tokens; first run"),
                 Err(e) => tracing::warn!(error = %e, "could not read credential store"),
+            }
+
+            match auth::load_lastfm() {
+                Ok(Some(s)) => {
+                    tracing::info!(user = %s.username, "restored last.fm session");
+                    *app.state::<AppState>().lastfm.lock().expect("lastfm mutex") = Some(s);
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "could not read last.fm session"),
             }
 
             // The env var is a one-off override for comparing materials; the
