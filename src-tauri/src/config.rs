@@ -1,11 +1,3 @@
-//! Build-time and runtime configuration.
-//!
-//! Two mechanisms, deliberately: integration keys are baked in with
-//! `option_env!` so forks supply their own, while debug toggles and path
-//! overrides are read from the environment at runtime so they can be flipped
-//! without a rebuild. Absent values disable a feature - never panic.
-
-/// Compile-time integration keys. `None` means the feature is simply off.
 pub struct Keys;
 
 impl Keys {
@@ -47,10 +39,6 @@ impl Runtime {
     }
 }
 
-/// Navidrome connection from the environment, read via `std::env` rather
-/// than `option_env!` like the integration keys above - changing which
-/// server you point at must not require a rebuild. Mirrors how
-/// `CAPSULE_DB_PATH` behaves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NavidromeEnv {
     pub url: String,
@@ -58,10 +46,6 @@ pub struct NavidromeEnv {
     pub password: String,
 }
 
-/// All three keys, or nothing - a partial set is ignored rather than merged
-/// with stored settings, since pairing a development server URL with
-/// production credentials by accident is worse than not applying the
-/// override at all.
 pub fn navidrome_env() -> Option<NavidromeEnv> {
     let get = |k: &str| {
         std::env::var(k).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
@@ -100,8 +84,6 @@ pub fn describe() -> String {
 mod tests {
     use super::*;
 
-    /// One test rather than three: these mutate process-wide environment, so
-    /// splitting them lets the cases interleave and clobber each other.
     #[test]
     fn navidrome_env_requires_all_three_keys() {
         let keys = ["NAVIDROME_URL", "NAVIDROME_USER", "NAVIDROME_PASSWORD"];
@@ -122,7 +104,6 @@ mod tests {
         assert_eq!(env.username, "deniz");
         assert_eq!(env.password, "sesame");
 
-        // Whitespace-only counts as unset, not as a value.
         std::env::set_var("NAVIDROME_USER", "   ");
         assert!(navidrome_env().is_none(), "blank is not a username");
 

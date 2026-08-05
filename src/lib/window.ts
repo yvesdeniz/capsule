@@ -1,10 +1,3 @@
-/**
- * Windowing maths for the virtual list.
- *
- * Extracted from the component so it can be tested directly. Off-by-one errors
- * here show up as rows that flicker or vanish while scrolling, which is exactly
- * the class of bug that is miserable to chase through the DOM.
- */
 export interface Range {
   first: number
   last: number

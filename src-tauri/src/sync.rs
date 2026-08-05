@@ -1,9 +1,3 @@
-//! Background library sync.
-//!
-//! Runs off the UI path entirely: pages stream from Apple straight into SQLite,
-//! and the UI learns about it through events. A sync failing must never leave
-//! the app unusable - the local mirror simply stays as stale as it was.
-
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -66,11 +60,8 @@ pub async fn run(app: AppHandle) {
     let settings = { state.settings.lock().expect("settings mutex").clone() };
     let tokens = { state.tokens.lock().expect("tokens mutex").clone() };
 
-    // Credential precedence lives in one place so sync and startup cannot
-    // disagree about which server they are talking to.
     let (settings, navidrome_password) = crate::source::resolve(&settings);
 
-    // Local files have no server and no client: the disk is the source.
     if settings.source == crate::settings::Source::Local {
         return scan_local(app.clone(), settings.local.folders.clone(), lease).await;
     }
@@ -86,14 +77,11 @@ pub async fn run(app: AppHandle) {
         }
     };
 
-    // Artwork fetches need a signed URL, which needs the live client.
     if let crate::source::SourceClient::Navidrome(ref nd) = client {
         let shared = std::sync::Arc::new(nd.clone_for_artwork());
         *app.state::<AppState>().navidrome.lock().expect("navidrome mutex") = Some(shared);
     }
 
-    // The database this sync belongs to. Every write checks it: swapping
-    // source mid-sync must not pour these rows into the new source's file.
     let generation = app.state::<AppState>().db_generation.load(Ordering::SeqCst);
     let still_ours = {
         let app = app.clone();
@@ -180,8 +168,6 @@ pub async fn run(app: AppHandle) {
         return fail(&app, "playlists", e, lease);
     }
 
-    // Apple fills playlist membership as part of its own paging; Subsonic
-    // needs a getPlaylist call per playlist.
     if let crate::source::SourceClient::Navidrome(ref nd) = client {
         let ids: Vec<String> = {
             let state = app.state::<AppState>();
@@ -266,11 +252,6 @@ pub fn counts(app: &AppHandle) -> LibraryCounts {
     db.counts().unwrap_or_default()
 }
 
-/// Walk the configured folders and mirror what is there into the library.
-///
-/// Reading tags is blocking work, so the walk happens off the async runtime.
-/// Rows land in batches for the same reason the network sources batch: the UI
-/// shows progress while a large library is still being read.
 async fn scan_local(app: AppHandle, folders: Vec<std::path::PathBuf>, lease: SyncLease) {
     use crate::local;
 

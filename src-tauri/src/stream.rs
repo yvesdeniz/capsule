@@ -1,8 +1,3 @@
-//! Streaming byte source: plays while downloading, caching to disk.
-//!
-//! Splitting the bookkeeping ([`CacheState`]) from the IO keeps the part worth
-//! testing free of HTTP and of a sound device.
-
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -12,11 +7,6 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-/// How much of a track has landed on disk, and whether the fetch died.
-///
-/// `available` is always a contiguous prefix from byte zero - sparse-range
-/// tracking is the nastiest part of a streaming cache, so a seek past the
-/// prefix abandons caching instead (see [`StreamingSource::seek`]).
 #[derive(Debug, Default)]
 pub struct CacheState {
     available: u64,
@@ -37,9 +27,6 @@ impl CacheState {
         self.total
     }
 
-    /// True only once the whole length is known and has arrived - a response
-    /// without Content-Length is never "complete", so readers keep waiting
-    /// rather than truncating the track.
     pub fn is_complete(&self) -> bool {
         matches!(self.total, Some(t) if self.available >= t)
     }
@@ -52,8 +39,6 @@ impl CacheState {
         self.total = total;
     }
 
-    /// Sticky: the first failure is the useful one, and a partial write
-    /// arriving afterwards must not mask it.
     pub fn fail(&mut self, reason: String) {
         if self.error.is_none() {
             self.error = Some(reason);
@@ -77,9 +62,6 @@ pub enum StreamError {
     Io(#[from] std::io::Error),
 }
 
-/// Returns a short count at the end of a complete stream - that's EOF, not an
-/// error. The timeout exists so a stalled server cannot wedge the decoder
-/// thread forever; the caller turns that into a playback error.
 pub fn wait_for(shared: &Shared, want: u64, timeout: Duration) -> Result<u64, StreamError> {
     let (lock, cvar) = &**shared;
     let deadline = Instant::now() + timeout;
@@ -107,12 +89,8 @@ pub fn wait_for(shared: &Shared, want: u64, timeout: Duration) -> Result<u64, St
     }
 }
 
-/// How long a read waits for bytes before giving up and reporting a stall.
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Audio cache ceiling: roughly a thousand transcoded tracks or a few hundred
-/// FLACs, large enough that normal listening never hits it. A constant, not
-/// a setting.
 pub const CACHE_CAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 pub fn cache_dir(app_data: Option<PathBuf>) -> Option<PathBuf> {
@@ -125,8 +103,6 @@ pub fn cache_path(dir: &Path, key: &str) -> PathBuf {
     dir.join(format!("{:x}.dat", h.finalize()))
 }
 
-/// `keep` is the file currently being played; evicting it would pull the file
-/// out from under the decoder mid-track.
 pub fn prune(dir: &Path, cap_bytes: u64, keep: Option<&Path>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = entries
@@ -160,18 +136,6 @@ pub fn prune(dir: &Path, cap_bytes: u64, keep: Option<&Path>) {
     }
 }
 
-/// `from` is a byte offset for a ranged refetch after a seek past the cached
-/// prefix; pass 0 for a fresh play.
-///
-/// The cache file is created synchronously, before the fetch is spawned, so
-/// the caller can open a reader immediately - this runs on the IPC command
-/// thread and must not block waiting on the response.
-/// A complete copy already on disk, if there is one.
-///
-/// Completion is recorded by a sidecar written only after the transfer
-/// finishes, because a `.dat` on its own is indistinguishable from a partial
-/// download that was interrupted - and replaying half a track from cache is
-/// worse than re-fetching it.
 fn cached_len(path: &Path) -> Option<u64> {
     let marker = path.with_extension("done");
     let want: u64 = std::fs::read_to_string(&marker).ok()?.trim().parse().ok()?;
@@ -186,12 +150,6 @@ fn mark_complete(path: &Path, len: u64) {
     }
 }
 
-/// A handle that stops a running transfer.
-///
-/// A forward seek starts a second transfer into the same file. Without
-/// cancelling the first, both write the same path at once - and if the original
-/// reaches its own end it writes a completion marker, certifying a corrupted
-/// file that every later play would then trust.
 #[derive(Clone, Default)]
 pub struct Cancel(Arc<AtomicBool>);
 
@@ -204,13 +162,6 @@ impl Cancel {
     }
 }
 
-/// Begin filling `path` from `url`, reporting progress through `shared`.
-///
-/// `from` is a byte offset for a ranged refetch after a seek outside the
-/// downloaded range; pass 0 for a fresh play, which is also the only case that
-/// may serve or write a cache entry. The file is created synchronously before
-/// the transfer is spawned, because the caller runs on the IPC command thread
-/// and must not wait on the network.
 pub fn spawn_fetch(
     url: String,
     path: PathBuf,
@@ -222,8 +173,6 @@ pub fn spawn_fetch(
         std::fs::create_dir_all(parent)?;
     }
 
-    // Serve the cache. Without this the whole cache is write-only: every play
-    // truncated the previous copy and downloaded the track again.
     if from == 0 {
         if let Some(len) = cached_len(&path) {
             tracing::debug!(path = %path.display(), len, "audio cache hit");
@@ -235,8 +184,7 @@ pub fn spawn_fetch(
             return Ok(());
         }
     }
-    // The fetch reopens for writing rather than truncating, which on Windows
-    // would collide with the reader's handle.
+
     File::create(&path)?;
 
     tauri::async_runtime::spawn(async move {
@@ -247,9 +195,6 @@ pub fn spawn_fetch(
             shared.1.notify_all();
         };
 
-        // No overall timeout: a whole track legitimately takes minutes. The
-        // connect and per-read timeouts are what stop a dead server hanging on
-        // to the task forever.
         let client = match reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .read_timeout(std::time::Duration::from_secs(30))
@@ -309,8 +254,6 @@ pub fn spawn_fetch(
             }
         }
 
-        // A chunked response has no Content-Length; settling it here is what
-        // lets the reader recognise EOF instead of waiting out its timeout.
         let landed = {
             let mut g = shared.0.lock().expect("cache state mutex");
             if g.total().is_none() {
@@ -321,9 +264,6 @@ pub fn spawn_fetch(
         };
         shared.1.notify_all();
 
-        // Only a complete, from-zero, uncancelled transfer earns a marker -
-        // anything else is partial or doesn't start at byte zero, and
-        // certifying it would let a later play trust a corrupted file.
         if from == 0 && !cancel.stopped() {
             mark_complete(&path, landed);
         }
@@ -331,23 +271,15 @@ pub fn spawn_fetch(
     Ok(())
 }
 
-/// A `Read + Seek` view over a file that is still being written, handed to
-/// `rodio::Decoder`, which needs both. Reads block until the fetch catches
-/// up.
 pub struct StreamingSource {
     file: File,
     shared: Shared,
     path: PathBuf,
     url: String,
-    /// Absolute byte offset that file position 0 corresponds to. Zero for a
-    /// sequential download; after a refetch, where that transfer started.
     base: u64,
-    /// Full track length, kept across refetches so `SeekFrom::End` still
-    /// works - a ranged response only reports the bytes remaining.
     total: Option<u64>,
     pos: u64,
     abandoned: bool,
-    /// Stops whichever transfer is currently writing this file.
     cancel: Cancel,
 }
 
@@ -371,8 +303,6 @@ impl StreamingSource {
         })
     }
 
-    /// True once a seek has taken us outside the downloaded range; the file no
-    /// longer starts at byte zero and must not be reused as a cache entry.
     pub fn caching_abandoned(&self) -> bool {
         self.abandoned
     }
@@ -389,18 +319,11 @@ impl StreamingSource {
         self.total
     }
 
-    /// Restart the transfer at `from`.
-    ///
-    /// Without this, seeking forward past the downloaded prefix waits for the
-    /// sequential transfer to reach that point - on a long track that means the
-    /// 20s read timeout and a dead player.
     fn refetch(&mut self, from: u64) -> std::io::Result<()> {
         tracing::debug!(from, "seek outside the buffer; refetching");
         self.cancel.stop();
         let total = self.known_total();
         let shared: Shared = Arc::new((Mutex::new(CacheState::new()), Condvar::new()));
-        // The file will no longer start at byte zero, so a completion marker
-        // for it would be a lie.
         let _ = std::fs::remove_file(self.path.with_extension("done"));
         let cancel = Cancel::default();
         spawn_fetch(self.url.clone(), self.path.clone(), shared.clone(), from, cancel.clone())?;
@@ -416,7 +339,6 @@ impl StreamingSource {
 
 impl Read for StreamingSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        // Positions are absolute; the file only holds bytes from `base` on.
         let local_pos = self.pos.saturating_sub(self.base);
         let want = local_pos + buf.len() as u64;
         let available = wait_for(&self.shared, want, READ_TIMEOUT)
@@ -450,9 +372,6 @@ impl Seek for StreamingSource {
             }
         };
 
-        // Outside what this transfer covers - either ahead of the download or
-        // behind where a previous refetch started. Restart the transfer there
-        // rather than waiting for a sequential download that may never reach it.
         if target < self.base || target > self.absolute_available() {
             let past_end = total.is_some_and(|t| target >= t);
             if !past_end {
@@ -628,8 +547,6 @@ mod tests {
 
     #[test]
     fn seek_from_end_uses_the_known_total() {
-        // symphonia probes with SeekFrom::End; without a total this must fail
-        // rather than silently reporting zero.
         let p = temp_file("seek-end.dat", b"0123456789");
         let s = shared();
         complete(&s, 10);
@@ -678,7 +595,6 @@ mod tests {
         let playing = dir.join("playing.dat");
         for p in [&old, &mid, &playing] {
             std::fs::write(p, vec![0u8; 400]).unwrap();
-            // Space the mtimes so ordering is unambiguous.
             std::thread::sleep(Duration::from_millis(20));
         }
 

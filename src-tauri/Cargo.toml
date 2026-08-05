@@ -54,6 +54,7 @@ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+webview2-com = "0.38"
 # Frameless chrome needs raw Win32: window subclassing to answer WM_NCHITTEST
 # with HTMAXBUTTON, which is what makes Windows 11 Snap Layouts appear.
 windows = { version = "0.61", features = [

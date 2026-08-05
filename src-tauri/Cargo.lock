@@ -474,6 +474,7 @@ dependencies = [
  "url",
  "urlencoding",
  "walkdir",
+ "webview2-com",
  "window-vibrancy",
  "windows 0.61.3",
 ]

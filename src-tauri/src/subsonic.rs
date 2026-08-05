@@ -1,10 +1,3 @@
-//! Subsonic API client, for Navidrome.
-//!
-//! Auth is Subsonic's salted-token scheme - `md5(password + salt)` - mandated
-//! by the protocol, not a security choice of ours. The plaintext password is
-//! needed at call time, so it lives in the OS credential store
-//! ([`crate::auth`]), never on disk in `config.toml`.
-
 use serde::Deserialize;
 
 use crate::db::{AlbumUpsert, ArtistUpsert, PlaylistUpsert, SongUpsert};
@@ -28,12 +21,6 @@ pub enum SubsonicError {
     Malformed(String),
 }
 
-/// Describe a transport failure **without** the request URL.
-///
-/// `reqwest::Error`'s own Display embeds the URL it was fetching, and for
-/// Subsonic that URL carries `u`, `s` and `t` - a working bearer credential for
-/// the whole account until the password changes. These errors get logged and
-/// end up in bug reports, so the URL can never be part of the message.
 impl From<reqwest::Error> for SubsonicError {
     fn from(e: reqwest::Error) -> Self {
         let what = if e.is_timeout() {
@@ -55,10 +42,6 @@ pub fn auth_token(password: &str, salt: &str) -> String {
     format!("{:x}", md5::compute(format!("{password}{salt}")))
 }
 
-/// The six query parameters every Subsonic call carries.
-///
-/// The salt is a parameter rather than generated here so callers can be tested
-/// deterministically.
 pub fn auth_query(user: &str, password: &str, salt: &str) -> Vec<(String, String)> {
     vec![
         ("u".into(), user.to_string()),
@@ -70,8 +53,6 @@ pub fn auth_query(user: &str, password: &str, salt: &str) -> Vec<(String, String
     ]
 }
 
-/// Defaulting to https rather than http matters: the derived token is
-/// replayable over plaintext, so an unqualified host gets the safe reading.
 pub fn normalize_base_url(raw: &str) -> Result<String, SubsonicError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -85,13 +66,10 @@ pub fn normalize_base_url(raw: &str) -> Result<String, SubsonicError> {
     Ok(with_scheme.trim_end_matches('/').to_string())
 }
 
-/// Surfaced as a warning in the connect screen, deliberately not a hard
-/// block: LAN-only self-hosting is a legitimate setup.
 pub fn is_insecure(base_url: &str) -> bool {
     base_url.trim().starts_with("http://")
 }
 
-/// Random salt, regenerated per request.
 pub fn random_salt() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
@@ -99,15 +77,9 @@ pub fn random_salt() -> String {
     format!("{:x}", md5::compute(format!("{nanos}{pid}")))[..12].to_string()
 }
 
-/// `coverArt` is an opaque id, not a URL, and fetching one needs auth. We store
-/// `subsonic:<id>` and resolve to a signed URL at fetch time, so credentials
-/// never land in the database - which the README promises is safe to share.
 pub const ARTWORK_PREFIX: &str = "subsonic:";
 
-/// Albums per `getAlbumList2` page. 500 is the Subsonic maximum.
 const ALBUM_PAGE: u32 = 500;
-/// Guard against a server that never returns a short page, mirroring the
-/// MAX_PAGES cap in `api.rs`.
 const MAX_ALBUM_PAGES: u32 = 500;
 
 pub fn cover_art_ref(id: Option<String>) -> Option<String> {
@@ -171,7 +143,6 @@ pub fn artists_from(index: ArtistIndex) -> Vec<ArtistUpsert> {
 pub fn album_from(a: WireAlbum) -> AlbumUpsert {
     AlbumUpsert {
         id: a.id,
-        // Apple's catalog id has no Subsonic equivalent.
         catalog_id: None,
         name: a.name,
         artist_name: a.artist,
@@ -179,15 +150,11 @@ pub fn album_from(a: WireAlbum) -> AlbumUpsert {
         release_date: a.year.map(|y| y.to_string()),
         track_count: a.song_count,
         added_at: a.created,
-        // Subsonic does not report cover dimensions.
         artwork_width: None,
         artwork_height: None,
     }
 }
 
-/// Album fetches in flight. Songs are N+1 by construction - Subsonic has no
-/// "all songs" endpoint - so this is what keeps a few thousand albums
-/// tolerable without hammering a self-hosted server.
 const ALBUM_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -209,7 +176,6 @@ pub struct WireSong {
     pub title: String,
     pub artist: String,
     pub album: String,
-    /// Seconds, per the Subsonic spec.
     pub duration: Option<u64>,
     pub track: Option<i64>,
     #[serde(rename = "discNumber")]
@@ -272,7 +238,6 @@ pub fn playlist_from(p: WirePlaylist) -> PlaylistUpsert {
         name: p.name,
         description: p.comment.filter(|c| !c.trim().is_empty()),
         artwork_url: cover_art_ref(p.cover_art),
-        // Editing playlists is out of scope for milestone 1.
         can_edit: false,
         artwork_width: None,
         artwork_height: None,
@@ -297,8 +262,6 @@ impl Client {
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent(concat!("capsule/", env!("CARGO_PKG_VERSION")))
-                // Without a timeout a silently stalled server holds the task
-                // and its socket for the life of the process.
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(60))
                 .build()?,
@@ -310,14 +273,10 @@ impl Client {
         &self.creds.base_url
     }
 
-    /// A second handle for artwork fetching. `reqwest::Client` is an Arc
-    /// internally, so this shares the connection pool.
     pub fn clone_for_artwork(&self) -> Self {
         Self { http: self.http.clone(), creds: self.creds.clone() }
     }
 
-    /// Public so artwork resolution can reuse it. The password is never a
-    /// query parameter - only the salt and the digest derived from it.
     pub fn signed_url(&self, method: &str, extra: &[(&str, String)]) -> String {
         let mut params = auth_query(&self.creds.username, &self.creds.password, &random_salt());
         for (k, v) in extra {
@@ -341,7 +300,6 @@ impl Client {
         parse_envelope(&body, key)
     }
 
-    /// Connectivity and credential check.
     pub async fn ping(&self) -> Result<(), SubsonicError> {
         #[derive(Deserialize)]
         struct Empty {}
@@ -399,18 +357,10 @@ impl Client {
         self.signed_url("stream", &[("id", id.to_string())])
     }
 
-    /// Carries auth in the query string, so anything that can reach the server
-    /// can fetch it without a session - which is what lets Discord's image bot
-    /// load it, and also why handing this URL out is a decision rather than a
-    /// detail.
     pub fn cover_art_url(&self, id: &str, size: u32) -> String {
         self.signed_url("getCoverArt", &[("id", id.to_string()), ("size", size.to_string())])
     }
 
-    /// Report a play; the server forwards it to whatever the user linked there.
-    ///
-    /// `submission=false` is a now-playing ping, `true` a completed play. Going
-    /// through the server means capsule never holds Last.fm credentials.
     pub async fn scrobble(&self, id: &str, submission: bool) -> Result<(), SubsonicError> {
         #[derive(Deserialize)]
         struct Empty {}
@@ -424,7 +374,6 @@ impl Client {
         Ok(())
     }
 
-    /// Track ids for one playlist, in playlist order.
     pub async fn playlist_track_ids(
         &self,
         playlist_id: &str,
@@ -435,8 +384,6 @@ impl Client {
         Ok(detail.entry.into_iter().map(|e| e.id).collect())
     }
 
-    /// A method rather than a closure so the borrow of `self` does not
-    /// collide with the mutable borrow of the JoinSet.
     fn spawn_album(
         &self,
         set: &mut tokio::task::JoinSet<(String, Result<WireAlbumDetail, SubsonicError>)>,
@@ -454,13 +401,6 @@ impl Client {
         });
     }
 
-    /// A single album failing is logged and skipped rather than aborting: one
-    /// flaky response should not kill a 2000-album sync. An auth failure is
-    /// different and propagates immediately, because retrying it once per
-    /// album helps nobody.
-    ///
-    /// `sink` is only ever called from this driving loop, never from a spawned
-    /// task, which is what lets it stay a plain `FnMut` matching `api.rs`.
     pub async fn library_songs(
         &self,
         mut sink: impl FnMut(Vec<SongUpsert>),
@@ -511,14 +451,6 @@ impl Client {
     }
 }
 
-/// Unwrap the `{"subsonic-response": {...}}` envelope.
-///
-/// `key` names the payload object to extract ("artists", "album", …); pass ""
-/// when the call has no payload, like ping.
-///
-/// A missing or null key becomes an empty object, not `null`: serde cannot
-/// build a struct from `null` even when every field has a default, so payload
-/// types must default all their fields for this to deserialise.
 pub fn parse_envelope<T: serde::de::DeserializeOwned>(
     body: &str,
     key: &str,
@@ -538,9 +470,6 @@ pub fn parse_envelope<T: serde::de::DeserializeOwned>(
             .and_then(|m| m.as_str())
             .unwrap_or("unknown error")
             .to_string();
-        // 40 = wrong username or password, 41 = token auth unsupported for
-        // this user. Both mean the credentials will never work, which needs a
-        // different remedy from any other failure.
         return match code {
             40 | 41 => Err(SubsonicError::Unauthorized),
             _ => Err(SubsonicError::Api { code, message }),
@@ -790,8 +719,6 @@ mod tests {
         assert_eq!(a.index.len(), 0);
     }
 
-    /// The fixture published in the Subsonic API documentation. Pinning to the
-    /// reference implementation rather than to our own reading of it.
     #[test]
     fn auth_token_matches_the_subsonic_reference_fixture() {
         assert_eq!(auth_token("sesame", "c19b2d"), "26719a1196d2a940705a59634eb18eab");

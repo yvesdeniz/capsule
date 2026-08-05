@@ -1,5 +1,3 @@
-//! The entire IPC surface. Keeping it in one file makes the
-//! renderer-agnostic boundary auditable: if it isn't here, the UI can't do it.
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -22,11 +20,6 @@ pub fn apply(app: &AppHandle, f: impl FnOnce(&mut Player) -> Vec<EngineCommand>)
     commit(app, &state, cmds);
 }
 
-/// What an [`EngineCommand`] means to the native backend.
-///
-/// The commands are MusicKit-shaped because the webview needs them that way.
-/// Natively most of them collapse: the player has already updated its own
-/// index, so SetQueue, SkipNext and SkipPrevious all mean "load current".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeAction {
     LoadCurrent,
@@ -57,7 +50,7 @@ fn commit(app: &AppHandle, state: &AppState, cmds: Vec<EngineCommand>) {
     for c in &cmds {
         tracing::debug!(?c, "engine command");
         match &engine {
-            // Native path: the webview is not involved at all.
+
             Some(engine) => run_native(app, state, engine, c),
             None => {
                 if let Err(e) = engine::send(app, c) {
@@ -71,9 +64,7 @@ fn commit(app: &AppHandle, state: &AppState, cmds: Vec<EngineCommand>) {
 
 fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, cmd: &EngineCommand) {
     let action = match native_action(cmd) {
-        // Play on an empty sink does nothing: after the queue ends, or after a
-        // stop, there is no source left to resume. Reload the current track
-        // instead of no-opping forever.
+
         NativeAction::Play if engine.is_empty() && !engine.is_loading() => {
             NativeAction::LoadCurrent
         }
@@ -90,7 +81,6 @@ fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, 
                 state.player.lock().expect("player mutex").state().current().cloned();
             let Some(track) = track else { return };
 
-            // A local track's id is its path, so there is nothing to fetch.
             let source = state.settings.lock().expect("settings mutex").source;
             if source == crate::settings::Source::Local {
                 if let Err(e) = engine.load_file(std::path::PathBuf::from(&track.id)) {
@@ -114,8 +104,7 @@ fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, 
             };
             let Some(dir) = dir else { return };
             let path = crate::stream::cache_path(&dir, &track.id);
-            // Pass the file we are about to play: past the cap, eviction could
-            // otherwise delete the very file rodio is reading.
+
             crate::stream::prune(&dir, crate::stream::CACHE_CAP_BYTES, Some(&path));
             let url = client.stream_url(&track.id);
             if let Err(e) = engine.load(url, path) {
@@ -128,11 +117,6 @@ fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, 
     }
 }
 
-/// Push the current player state to the UI, the media flyout and the taskbar.
-///
-/// `pub(crate)` because the native position ticker must call it too: updating
-/// the player without publishing leaves the transport frozen at 0:00 while
-/// audio plays.
 pub(crate) fn publish(app: &AppHandle, state: &AppState) {
     let snapshot = state.player.lock().expect("player mutex").state().clone();
     if let Err(e) = app.emit("player://state", &snapshot) {
@@ -144,11 +128,6 @@ pub(crate) fn publish(app: &AppHandle, state: &AppState) {
     report_now_playing(app, state, &snapshot);
 }
 
-/// Announce what is playing to Discord and to the scrobbler.
-///
-/// Lives here rather than in the audio ticker, since the ticker only runs for
-/// native sources and would leave Apple playback unannounced. `publish` is the
-/// one place both backends converge.
 fn report_now_playing(app: &AppHandle, state: &AppState, snapshot: &PlayerState) {
     use crate::player::Status;
 
@@ -158,8 +137,7 @@ fn report_now_playing(app: &AppHandle, state: &AppState, snapshot: &PlayerState)
     let mut last = state.now_reported.lock().expect("now reported mutex");
 
     if stopped {
-        // Otherwise the presence card keeps claiming you're listening for as
-        // long as the app stays open.
+
         if last.track_id.is_some() {
             last.track_id = None;
             last.scrobbled = false;
@@ -185,8 +163,6 @@ fn report_now_playing(app: &AppHandle, state: &AppState, snapshot: &PlayerState)
     }
 }
 
-/// Report a play, either straight to Last.fm or through a server that forwards
-/// it. Never both: two routes to the same account would count every play twice.
 fn scrobble(app: &AppHandle, track: &Track, position_ms: u64, submission: bool) {
     let state = app.state::<AppState>();
 
@@ -234,7 +210,6 @@ fn scrobble(app: &AppHandle, track: &Track, position_ms: u64, submission: bool) 
     });
 }
 
-/// Resolve cover art, then hand the track to Discord.
 fn present(app: &AppHandle, track: Track, status: crate::player::Status) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -255,9 +230,6 @@ fn present(app: &AppHandle, track: Track, status: crate::player::Status) {
             crate::lastfm::album_art(&http, &api_key, &track.artist, &track.album).await
         };
 
-        // Discord's IPC is synchronous and can block indefinitely on a payload
-        // it dislikes. On the async runtime that parks a worker, and the audio
-        // download runs on the same runtime.
         std::thread::spawn(move || presence.show(&track, status, image.as_deref()));
     });
 }
@@ -603,12 +575,8 @@ pub fn settings_set(
     let source = settings.source;
     *state.settings.lock().expect("settings mutex") = settings;
 
-    // Each source has its own database file. Leaving the old handle open would
-    // show the previous source's library and write the new one's rows into it.
     if source != previous {
         use_database_for(&app, source)?;
-        // Without this the old source's backend keeps handling playback, with
-        // the new source's track ids.
         reconcile_backend(&app, source);
         let _ = app.emit("library://updated", sync::counts(&app));
     }
@@ -680,12 +648,6 @@ pub fn library_sync(app: AppHandle) {
     tauri::async_runtime::spawn(async move { sync::run(app).await });
 }
 
-/// Which id the playback backend addresses a track by.
-///
-/// MusicKit plays from Apple's catalog, so that path needs `catalog_id` and a
-/// track without one is genuinely unplayable. Native sources address tracks by
-/// their own library id - and they never have a catalog id, so filtering on one
-/// would silently discard the entire library.
 fn playable_id(source: crate::settings::Source, s: &SongRow) -> Option<String> {
     use crate::settings::Source;
     match source {
@@ -747,7 +709,6 @@ pub fn play_songs(app: AppHandle, songs: Vec<SongRow>, start_index: Option<usize
     }
 }
 
-/// Whether the active source is served by Apple's catalog API.
 fn uses_apple_catalog(app: &AppHandle) -> bool {
     let source = app.state::<AppState>().settings.lock().expect("settings mutex").source;
     matches!(source, crate::settings::Source::Apple)
@@ -766,9 +727,7 @@ async fn ensure_album_songs(app: &AppHandle, album_id: &str) -> Result<Vec<SongR
             return Ok(rows);
         }
     }
-    // Only Apple backfills on demand. Other sources mirror everything during a
-    // sync, so an empty album means the sync is incomplete - querying the
-    // Apple API here would misreport it as not being signed in.
+
     if !uses_apple_catalog(app) {
         return Err("no tracks for this album yet - try syncing your library".into());
     }
@@ -826,30 +785,11 @@ pub async fn play_playlist(app: AppHandle, playlist_id: String) -> Result<(), St
     Ok(())
 }
 
-/// Point the library at the database belonging to `source`.
-///
-/// Each source has its own file, and the handle is opened once at startup from
-/// whatever source was configured then. Switching source at runtime without
-/// this writes the new source's rows into the previous source's database -
-/// which corrupts both and defeats the per-source split entirely.
-/// Make the playback backend match the active source.
-///
-/// Sources need different machinery: Apple drives a hidden MusicKit webview,
-/// Navidrome decodes natively. Creating both is what made a Navidrome session
-/// carry a second Chromium loading music.apple.com - around half the app's
-/// memory, doing nothing. Leaving stale state behind is worse: after switching,
-/// commands route to the wrong backend and ids from one source get fed to the
-/// other.
-///
-/// Called on startup and on every source change, and safe to call twice.
 pub(crate) fn reconcile_backend(app: &AppHandle, source: crate::settings::Source) {
     use crate::settings::Source;
     let state = app.state::<AppState>();
     let webview_source = matches!(source, Source::Apple | Source::Spotify);
 
-    // A queue from the previous source is meaningless here: its ids belong to
-    // a catalog this backend cannot address. Stop, forget it, and tell the UI
-    // and Discord, or both keep announcing a track that is not playing.
     if let Some(engine) = state.audio.lock().expect("audio mutex").clone() {
         engine.stop();
     }
@@ -871,7 +811,6 @@ pub(crate) fn reconcile_backend(app: &AppHandle, source: crate::settings::Source
         return;
     }
 
-    // Native source: tear the webview down rather than leaving it resident.
     if let Some(w) = crate::engine::window(app) {
         if let Err(e) = w.close() {
             tracing::warn!(error = %e, "could not close the engine webview");
@@ -880,7 +819,7 @@ pub(crate) fn reconcile_backend(app: &AppHandle, source: crate::settings::Source
     }
 
     let settings = state.settings.lock().expect("settings mutex").clone();
-    // Local files need no client at all; only Navidrome talks to a server.
+
     *state.navidrome.lock().expect("navidrome mutex") =
         crate::source::navidrome_client(&settings).map(std::sync::Arc::new);
 
@@ -905,9 +844,7 @@ fn use_database_for(app: &AppHandle, source: crate::settings::Source) -> Result<
     let opened = crate::db::Db::open_at(&path).map_err(|e| e.to_string())?;
     tracing::info!(path = %path.display(), ?source, "switching library database");
     *state.db.lock().expect("db mutex") = opened;
-    // Any sync still running was writing into the file we just replaced. Bump
-    // the generation so it abandons itself rather than pouring the previous
-    // source's rows into this one.
+
     state.db_generation.fetch_add(1, Ordering::SeqCst);
     Ok(())
 }
@@ -924,8 +861,6 @@ pub struct NavidromeStatus {
 #[tauri::command]
 pub fn navidrome_status(state: State<'_, AppState>) -> NavidromeStatus {
     let settings = state.settings.lock().expect("settings mutex").clone();
-    // Either store counts as configured: the env override exists precisely so
-    // a dev machine can skip the connect screen.
     let has_password = crate::config::navidrome_env().is_some()
         || auth::load_navidrome().ok().flatten().is_some();
     NavidromeStatus {
@@ -938,11 +873,6 @@ pub fn navidrome_status(state: State<'_, AppState>) -> NavidromeStatus {
     }
 }
 
-/// Verify a Navidrome login, then persist it.
-///
-/// Order matters: ping first, write second. Storing credentials we have not
-/// verified would leave the app in a state where sync fails for a reason the
-/// user has no way to see.
 #[tauri::command]
 pub async fn navidrome_connect(
     app: AppHandle,
@@ -982,8 +912,6 @@ pub async fn navidrome_connect(
         }
     }
 
-    // Must happen before the sync: otherwise Navidrome's rows land in whichever
-    // database was open at launch.
     use_database_for(&app, crate::settings::Source::Navidrome)?;
     reconcile_backend(&app, crate::settings::Source::Navidrome);
     let _ = app.emit("library://updated", sync::counts(&app));
@@ -1023,11 +951,6 @@ pub fn lastfm_status(state: State<'_, AppState>) -> LastfmStatus {
     }
 }
 
-/// Open Last.fm's own authorisation page, then wait for the user to approve.
-///
-/// `auth.getSession` refuses until the token is authorised, so polling it is
-/// how the desktop flow is meant to detect approval - there is no callback to
-/// a desktop app.
 #[tauri::command]
 pub async fn lastfm_connect(app: AppHandle) -> Result<(), String> {
     let (api_key, shared_secret) = {
@@ -1105,12 +1028,6 @@ pub fn lastfm_disconnect(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Everything worth knowing in a bug report, as pasteable text.
-///
-/// Deliberately redacted: the server URL and username identify a private host,
-/// and no credential ever appears. What remains is what actually explains a
-/// fault - which source, which backend, what the library looks like, what the
-/// player thinks it is doing.
 #[tauri::command]
 pub fn dev_diagnostics(app: AppHandle) -> String {
     let state = app.state::<AppState>();
@@ -1183,8 +1100,6 @@ mod tests {
 
     #[test]
     fn musickit_only_commands_are_no_ops_natively() {
-        // Rust already applied shuffle and repeat to its own queue; forwarding
-        // them would double-apply. Prewarm has no DRM path to warm.
         assert_eq!(native_action(&EngineCommand::Prewarm { id: "x".into() }), NativeAction::Ignore);
         assert_eq!(native_action(&EngineCommand::SetShuffle { on: true }), NativeAction::Ignore);
         assert_eq!(native_action(&EngineCommand::SetRepeat { mode: 2 }), NativeAction::Ignore);
@@ -1216,9 +1131,7 @@ mod tests {
     #[test]
     fn native_sources_queue_by_library_id_not_catalog_id() {
         use crate::settings::Source;
-        // Navidrome tracks have no catalog id - that is an Apple concept. If
-        // the queue filters on one, the entire library becomes unplayable and
-        // the transport just says "Nothing queued".
+
         let navidrome_track = row("tr-1", None);
         assert_eq!(playable_id(Source::Navidrome, &navidrome_track).as_deref(), Some("tr-1"));
         assert_eq!(playable_id(Source::Local, &navidrome_track).as_deref(), Some("tr-1"));

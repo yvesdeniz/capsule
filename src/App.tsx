@@ -40,8 +40,6 @@ type Detail = {
 
 const ROW = 40
 
-/// Which "your login stopped working" message to show. The Apple wording is
-/// wrong for a Navidrome library, and it appears on two separate events.
 function authMessage(source: Source) {
   return source === 'navidrome'
     ? 'Navidrome rejected your login. Reconnect to continue.'
@@ -65,16 +63,11 @@ export default function App() {
   const [onboarding, setOnboarding] = useState<boolean | null>(null)
   const [source, setSource] = useState<Source>('apple')
   const [ndStatus, setNdStatus] = useState<NavidromeStatus | null>(null)
-  // The album or playlist currently opened.
   const [detail, setDetail] = useState<Detail | null>(null)
-  // The subscription effect only re-runs on [reload], so its handlers read the
-  // live source through a ref rather than a value captured at subscribe time.
   const sourceRef = useRef<Source>('apple')
   sourceRef.current = source
   const lastListRefresh = useRef(0)
 
-  // All of this belongs to one source; carrying it across a switch leaves the
-  // UI describing a library Rust has already closed.
   const applySource = useCallback((next: Source) => {
     setSource((prev) => {
       if (prev !== next) {
@@ -116,9 +109,6 @@ export default function App() {
       on('player://state', setState),
       on('library://progress', (p) => {
         setProgress(p)
-        // library://updated only lands when the whole sync finishes, which for
-        // Navidrome is one request per album. Refresh as rows arrive instead,
-        // throttled so a fast source does not re-query on every batch.
         const now = Date.now()
         if (!p.done && now - lastListRefresh.current > 1000) {
           lastListRefresh.current = now
@@ -128,9 +118,6 @@ export default function App() {
       on('library://updated', (c) => {
         setCounts(c)
         void reload()
-        // Connecting from Settings switches the source underneath us and kicks
-        // off a sync. Re-read it here so the status strip and transport stop
-        // describing the source we are no longer on.
         void settings.get().then((s) => applySource(s.source))
       }),
       on('library://failed', (f) => {
@@ -186,11 +173,6 @@ export default function App() {
 
   const shown: SongRow[] = useMemo(() => results ?? songs, [results, songs])
 
-  // The id the queue addresses a track by. Apple and Spotify play from their
-  // catalog, so a row without a catalog id genuinely cannot be played; native
-  // sources use their own library id and never have a catalog id, so judging
-  // them by one greys out the whole library and swallows the double-click
-  // before it reaches Rust.
   const trackIdOf = useCallback(
     (s: SongRow) => (source === 'navidrome' || source === 'local' ? s.id : s.catalog_id),
     [source],
@@ -199,8 +181,6 @@ export default function App() {
 
   const nowPlayingId =
     state && state.index !== null ? (state.queue[state.index]?.id ?? null) : null
-  // Apple and Spotify play through the hidden webview; everything else decodes
-  // in Rust, where the engine, sign-in and storefront have no meaning.
   const webviewSource = source === 'apple' || source === 'spotify'
   const empty = counts !== null && counts.songs === 0 && counts.albums === 0
 
@@ -212,8 +192,6 @@ export default function App() {
     )
   }
 
-  // Navidrome selected but never verified: the library would just be empty
-  // with no explanation, so ask for the password instead.
   if (source === 'navidrome' && ndStatus && !ndStatus.configured) {
     return (
       <div className="relative h-full">
@@ -253,7 +231,6 @@ export default function App() {
           ⌘K
         </button>
         <span data-tauri-drag-region className="ml-auto shrink-0 pr-3 label">
-          {/* Apple tokens say nothing about a Navidrome session. */}
           {webviewSource
             ? authed?.authenticated
               ? `signed in · ${authed.storefront ?? ''}`
@@ -312,9 +289,6 @@ export default function App() {
           {problem && (
             <div className="flex items-center gap-3 border-b border-rule/70 bg-[color-mix(in_srgb,var(--color-warn)_9%,transparent)] px-4 py-2.5 text-xs">
               <span className="text-warn">{problem}</span>
-              {/* Apple's login lives in the engine webview, which native
-                  sources do not have. Offering it on a Navidrome error sent
-                  people to the wrong service entirely. */}
               {webviewSource && !authed?.authenticated && (
                 <button
                   onClick={() => void auth.showLogin()}
@@ -448,7 +422,7 @@ function SongLine({
           onPlay()
         }
       }}
-      // Double-click alone left the whole library unreachable without a mouse.
+
       role="button"
       tabIndex={playable ? 0 : -1}
       aria-disabled={!playable}
@@ -471,10 +445,6 @@ function SongLine({
   )
 }
 
-/// The tracks inside an album or playlist.
-///
-/// Loads on open rather than up front: a library can hold hundreds of albums,
-/// and only the one being looked at needs its contents.
 function DetailView({
   detail,
   canPlay,
@@ -535,9 +505,6 @@ function DetailView({
         </button>
       </div>
 
-      {/* VirtualList positions itself absolutely, so it needs a positioned box
-          to fill - without this it resolves against an ancestor and covers the
-          header above. */}
       <div className="relative min-h-0 flex-1">
         {songs === null ? (
           <div className="flex h-full items-center justify-center text-[11px] text-muted">

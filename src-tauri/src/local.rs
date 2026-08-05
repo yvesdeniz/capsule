@@ -1,9 +1,3 @@
-//! Local files as a library source.
-//!
-//! Shares the native playback path with Navidrome; only the byte source differs,
-//! and here it is just a file. Scanning reads tags rather than asking a server,
-//! and the rows it produces are the same `*Upsert` types every other source
-//! feeds into SQLite.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +6,6 @@ use sha2::{Digest, Sha256};
 
 use crate::db::{AlbumUpsert, ArtistUpsert, SongUpsert};
 
-/// Extensions rodio's symphonia backend can decode.
 const AUDIO: &[&str] = &["flac", "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "wave"];
 
 pub fn is_audio(path: &Path) -> bool {
@@ -22,8 +15,6 @@ pub fn is_audio(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Cover art is resolved on demand from the file itself, so the database holds
-/// a reference rather than a path to an image that may not exist.
 pub const ARTWORK_PREFIX: &str = "local:";
 
 pub fn artwork_ref(path: &Path) -> String {
@@ -39,10 +30,6 @@ fn stable_id(parts: &[&str]) -> String {
     format!("{:x}", h.finalize())[..16].to_string()
 }
 
-/// Albums group on album-artist plus title.
-///
-/// Grouping on the track artist would scatter a compilation into one album per
-/// performer, which is the single most visible way a local library goes wrong.
 pub fn album_id(album_artist: &str, album: &str) -> String {
     stable_id(&[album_artist, album])
 }
@@ -51,7 +38,6 @@ pub fn artist_id(name: &str) -> String {
     stable_id(&[name])
 }
 
-/// What a file's tags told us, already defaulted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tags {
     pub title: String,
@@ -64,8 +50,6 @@ pub struct Tags {
     pub has_picture: bool,
 }
 
-/// A file with no usable title is still a track: name it after the file rather
-/// than dropping it, or an untagged rip silently disappears from the library.
 pub fn title_fallback(path: &Path) -> String {
     path.file_stem()
         .and_then(|s| s.to_str())
@@ -75,8 +59,6 @@ pub fn title_fallback(path: &Path) -> String {
 
 pub fn song_from(path: &Path, tags: &Tags) -> SongUpsert {
     SongUpsert {
-        // The path is the id: stable across rescans, and playback is then just
-        // opening it. Nothing else needs to be looked up.
         id: path.display().to_string(),
         catalog_id: None,
         name: tags.title.clone(),
@@ -93,10 +75,6 @@ pub fn song_from(path: &Path, tags: &Tags) -> SongUpsert {
     }
 }
 
-/// Fold scanned tracks into the album rows they imply.
-///
-/// Album artwork borrows the first track that actually carries a picture, so an
-/// album whose art sits only on track 3 still shows a cover.
 pub fn albums_from(songs: &[SongUpsert], tags: &HashMap<String, Tags>) -> Vec<AlbumUpsert> {
     let mut out: HashMap<String, AlbumUpsert> = HashMap::new();
     for s in songs {

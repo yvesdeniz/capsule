@@ -49,10 +49,6 @@ export function Lyrics({ state }: { state: PlayerState | null }) {
       ?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, [active])
 
-  // Correct against the nearest line start, not the active one: a tap lands a
-  // little before or after the vocal, and measuring from a line that began
-  // seconds ago produces an absurd offset. Implausible taps are ignored rather
-  // than saved, which is how a 5s correction got stored before.
   const tap = () => {
     const starts = items.filter((i) => i.kind === 'line').map((i) => i.at)
     if (starts.length === 0) return
@@ -130,7 +126,6 @@ function Dots({ progress, on }: { progress: number; on: boolean }) {
 }
 
 const OFFSET_LIMIT = 5_000
-/** A tap further than this from any line start is a mistap, not a measurement. */
 const TAP_MAX_MS = 2_000
 
 function useOffset(): [number, (next: number) => void] {

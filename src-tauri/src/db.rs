@@ -1,12 +1,3 @@
-//! Local mirror of the Apple Music library.
-//!
-//! This is the reason the app feels faster than Apple's: the UI reads only from
-//! here, so browsing never waits on the network. Sync writes in the background
-//! and the UI finds out via an event.
-//!
-//! Apple gives library items IDs like `l.AbCdEf` which are **not** catalog IDs.
-//! Playback needs the catalog ID, so both are stored and `catalog_id` is what
-//! the player queues.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -331,8 +322,6 @@ impl Db {
         Ok(rows.len())
     }
 
-    /// Every playlist id currently mirrored. Sources that fill playlist
-    /// membership in a second pass need this to know what to ask for.
     pub fn playlist_ids(&self) -> Result<Vec<String>, DbError> {
         let mut stmt = self.conn.prepare("SELECT id FROM playlists")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -426,9 +415,7 @@ impl Db {
         let row = self
             .conn
             .query_row(
-                // Matched on either id: native sources have no catalog id, so
-                // looking up by that alone silently returns nothing and lyrics
-                // never resolve. Mirrors `artwork_for`.
+
                 "SELECT name, artist_name, album_name, duration_ms
                  FROM songs WHERE id = ?1 OR catalog_id = ?1 LIMIT 1",
                 params![catalog_id],
@@ -683,17 +670,6 @@ pub fn default_db_path(
     Ok(app_data.ok_or(DbError::NoDataDir)?.join(file))
 }
 
-/// One-time move of the pre-multi-source database.
-///
-/// Installs from before per-source files have `library.sqlite3`. Leaving it
-/// behind would silently orphan the library and trigger a full re-sync, so it
-/// is claimed for Apple, which is the only source that could have written it.
-/// Never overwrites an existing target.
-///
-/// The `-wal` and `-shm` sidecars move with it. SQLite derives their names from
-/// the database filename, so renaming the main file alone strands the write-ahead
-/// log - and in WAL mode that log holds committed transactions that have not yet
-/// been checkpointed. Losing it loses data.
 pub fn migrate_legacy_db(dir: &Path) -> std::io::Result<()> {
     let legacy = dir.join("library.sqlite3");
     let target = dir.join("library-apple.sqlite3");
@@ -704,8 +680,6 @@ pub fn migrate_legacy_db(dir: &Path) -> std::io::Result<()> {
     tracing::info!("migrating legacy library.sqlite3 to library-apple.sqlite3");
     std::fs::rename(&legacy, &target)?;
 
-    // Sidecars are best-effort: a clean shutdown leaves none, and failing the
-    // whole migration because one is missing would be worse than continuing.
     for suffix in ["-wal", "-shm"] {
         let from = dir.join(format!("library.sqlite3{suffix}"));
         let to = dir.join(format!("library-apple.sqlite3{suffix}"));
@@ -991,9 +965,6 @@ mod tests {
         assert_eq!(db.counts().unwrap().artists, 2);
     }
 
-    /// One test, not two: `CAPSULE_DB_PATH` is process-wide, and cargo runs
-    /// tests in parallel - a separate override test races this one and makes
-    /// both flaky.
     #[test]
     fn db_path_is_per_source_unless_overridden() {
         let data = Some(PathBuf::from(r"C:\appdata"));
@@ -1028,9 +999,7 @@ mod tests {
 
     #[test]
     fn migration_takes_the_wal_and_shm_with_it() {
-        // SQLite derives sidecar names from the database filename. Renaming the
-        // main file alone strands the write-ahead log, and in WAL mode that log
-        // holds committed-but-uncheckpointed transactions - losing it loses data.
+
         let dir = std::env::temp_dir().join(format!("capsule-legacy-wal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1049,8 +1018,7 @@ mod tests {
 
     #[test]
     fn migration_without_sidecars_is_fine() {
-        // A cleanly-closed database has no wal or shm; their absence must not
-        // fail the migration.
+
         let dir = std::env::temp_dir().join(format!("capsule-legacy-nowal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

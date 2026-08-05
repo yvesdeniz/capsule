@@ -1,9 +1,3 @@
-//! capsule - a fast music client for Windows and Linux.
-//!
-//! Rust owns all state. The React UI, the hidden `music.apple.com` engine
-//! window, and the native decoder are all just clients of it, which is what
-//! keeps the now-playing view, the OS media controls, Discord and the scrobbler
-//! from ever disagreeing with each other.
 
 pub mod api;
 pub mod audio;
@@ -23,16 +17,17 @@ pub mod settings;
 pub mod source;
 pub mod stream;
 pub mod subsonic;
+pub mod suspend;
 #[cfg(target_os = "windows")]
 pub mod snap;
 #[cfg(target_os = "windows")]
 pub mod thumbbar;
 pub mod sync;
 
-use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use player::Player;
 
@@ -48,24 +43,11 @@ pub struct AppState {
     pub db: Mutex<db::Db>,
     pub settings: Mutex<settings::Settings>,
     pub data_dir: Mutex<Option<std::path::PathBuf>>,
-    /// The live Navidrome client, when that source is active. Artwork fetches
-    /// need it to sign cover URLs, which cannot be stored in the database.
     pub navidrome: Mutex<Option<std::sync::Arc<subsonic::Client>>>,
-    /// The native playback engine, present when the active source plays in
-    /// Rust. `None` on the Apple path, or when no output device exists.
     pub audio: Mutex<Option<std::sync::Arc<audio::Engine>>>,
-    /// Rich Presence, when a client id is configured.
     pub discord: Mutex<Option<std::sync::Arc<discord::Presence>>>,
-    /// The Last.fm session, when the user has linked their account.
     pub lastfm: Mutex<Option<lastfm::Session>>,
-    /// What was last announced to Discord and the scrobbler, so a 250ms
-    /// publish loop does not re-announce the same track forever.
     pub now_reported: Mutex<NowReported>,
-    /// Bumped every time the library database is swapped.
-    ///
-    /// A sync captures this when it starts and abandons itself if it changes,
-    /// so a source switch mid-sync cannot write one source's rows into
-    /// another's file.
     pub db_generation: std::sync::atomic::AtomicU64,
     pub sync: sync::SyncGuard,
     pub login_prompted: AtomicBool,
@@ -141,11 +123,6 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Build the main window and attach everything that hangs off its handle.
-///
-/// Callable more than once: closing to the tray destroys the window to release
-/// the webview's memory, and showing it again rebuilds from here. All state
-/// lives in Rust, so the fresh UI rehydrates itself over IPC.
 fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
@@ -173,17 +150,39 @@ fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
         ))
         .build()?;
 
-    // Closing releases the webview rather than exiting: the tray keeps playback
-    // running, and a hidden renderer would still hold its memory.
     {
         let app = app.clone();
-        main.clone().on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        let suspended = Arc::new(AtomicBool::new(false));
+        main.clone().on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.destroy();
                 }
             }
+            tauri::WindowEvent::Resized(size) => {
+                let minimized = size.width == 0 && size.height == 0;
+                let handle = app.clone();
+                let suspended = suspended.clone();
+                let _ = app.run_on_main_thread(move || {
+                    let Some(w) = handle.get_webview_window("main") else {
+                        return;
+                    };
+                    if minimized {
+                        if w.is_minimized().unwrap_or(false)
+                            && !suspended.swap(true, Ordering::SeqCst)
+                        {
+                            suspend::suspend(&w);
+                        }
+                    } else if suspended.swap(false, Ordering::SeqCst) {
+                        suspend::resume(&w);
+                        let state = handle.state::<AppState>();
+                        commands::publish(&handle, &state);
+                        let _ = handle.emit("library://updated", sync::counts(&handle));
+                    }
+                });
+            }
+            _ => {}
         });
     }
 
@@ -215,6 +214,7 @@ fn show_main(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
+        suspend::resume(&w);
         let _ = w.set_focus();
         return;
     }
@@ -286,15 +286,10 @@ pub fn run() {
 
             let data_dir = app.path().app_data_dir().ok();
 
-            // Settings must load before the library: each source keeps its own
-            // database file, so `source` decides which one we open.
             let loaded = data_dir.as_ref().map(|d| settings::load(d)).unwrap_or_default();
             let active_source = loaded.source;
 
             if let Some(dir) = data_dir.as_ref() {
-                // Installs from before per-source files carry library.sqlite3;
-                // claim it for Apple rather than orphaning it. Failing here
-                // must not stop the app starting.
                 if let Err(e) = db::migrate_legacy_db(dir) {
                     tracing::warn!(error = %e, "legacy db migration failed; continuing");
                 }
@@ -352,14 +347,10 @@ pub fn run() {
                 Err(e) => tracing::warn!(error = %e, "could not read last.fm session"),
             }
 
-            // The env var is a one-off override for comparing materials; the
-            // setting is what persists, so `bun run app` looks the way the user
-            // last chose rather than depending on how it was launched.
             let glass = std::env::var("CAPSULE_GLASS").unwrap_or_else(|_| {
                 app.state::<AppState>().settings.lock().expect("settings mutex").appearance.glass.clone()
             });
-            // Before the first webview: only the sources that run a hidden
-            // engine window need the anti-throttling flags.
+
             engine::apply_webview_flags(matches!(
                 active_source,
                 settings::Source::Apple | settings::Source::Spotify
@@ -368,9 +359,6 @@ pub fn run() {
 
             build_tray(app)?;
 
-            // Only the source that needs it gets a webview. Spawning it
-            // unconditionally cost a second Chromium on music.apple.com during
-            // every native session.
             commands::reconcile_backend(&handle, active_source);
             if runtime.show_engine_window {
                 tracing::warn!("SHOW_ENGINE_WINDOW is set - engine webview is visible");

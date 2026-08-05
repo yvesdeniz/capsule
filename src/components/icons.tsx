@@ -1,14 +1,3 @@
-/**
- * Hand-drawn monoline icons.
- *
- * No icon library on purpose: a dependency for a dozen glyphs is wasteful, the
- * CSP blocks icon-font CDNs, and off-the-shelf sets are exactly what makes an
- * app read as generic. These match the hairline language - sharp corners (square
- * is structure), thin stroke, `currentColor` so they inherit ink/muted/state.
- *
- * Two weights: transport at 1.6px for legibility at ~16px, readout at 1.4px
- * since those render around 11px and need to stay crisp.
- */
 import type { SVGProps } from 'react'
 
 type IconProps = Omit<SVGProps<SVGSVGElement>, 'strokeWidth'> & {

@@ -197,9 +197,6 @@ impl Engine {
         self.sink.pause();
     }
 
-    /// A seek before the decoder exists cannot be applied, so it is held and
-    /// replayed once the track is in the sink. Dropping it snaps the bar back
-    /// on the next tick.
     pub fn seek(&self, ms: u64) {
         if self.is_loading() {
             *self.pending_seek.lock().expect("pending seek mutex") = Some(ms);
@@ -240,17 +237,12 @@ impl Engine {
     }
 }
 
-/// Edge-triggered on purpose: a level check would call next_track on every
-/// tick while idle.
 fn track_ended(was_playing: bool, sink_empty: bool) -> bool {
     was_playing && sink_empty
 }
 
 
 
-/// rodio has no non-blocking completion callback, so this polls. 250ms is
-/// fine for lyrics because `offset_ms` calibration already corrects reported
-/// position against real output.
 pub fn start_ticker(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         use tauri::{Emitter, Manager};
@@ -274,10 +266,7 @@ pub fn start_ticker(app: tauri::AppHandle) {
                 let _ = app.emit("playback://error", err);
                 engine.stop();
                 was_playing = false;
-                // Stopping alone leaves status at Loading, showing a spinner over
-                // a track that will never start; this marks it stopped instead of
-                // auto-advancing, since that would tear through an entire
-                // broken-server queue.
+
                 let state = app.state::<crate::AppState>();
                 state.player.lock().expect("player mutex").set_status(crate::player::Status::Idle);
                 crate::commands::publish(&app, &state);
@@ -295,7 +284,7 @@ pub fn start_ticker(app: tauri::AppHandle) {
                 let state = app.state::<crate::AppState>();
                 {
                     let mut p = state.player.lock().expect("player mutex");
-                    // Nothing else reports native playback state.
+
                     p.set_status(if engine.is_paused() {
                         crate::player::Status::Paused
                     } else {
@@ -303,19 +292,14 @@ pub fn start_ticker(app: tauri::AppHandle) {
                     });
                     p.on_position(ms);
                 }
-                // Transport, media flyout, and taskbar all redraw from
-                // player://state.
+
                 crate::commands::publish(&app, &state);
             }
 
             if track_ended(was_playing, empty) {
-                // The same path the Next button uses, so repeat and
-                // end-of-queue behave identically however the track ended.
+
                 crate::commands::apply(&app, |p| p.next_track());
 
-                // At the end of the queue, `next_track` leaves the sink empty with
-                // an index still set; without this reset, Play would call
-                // sink.play() on nothing forever.
                 let ended = {
                     let state = app.state::<crate::AppState>();
                     let status = state.player.lock().expect("player mutex").state().status;
@@ -350,7 +334,6 @@ mod tests {
         assert!(!track_ended(false, false));
     }
 
-    /// Opening a real device needs hardware CI does not have.
     #[test]
     #[ignore]
     fn engine_opens_the_default_device() {

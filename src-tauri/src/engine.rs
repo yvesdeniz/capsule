@@ -31,7 +31,8 @@ pub fn apply_webview_flags(_hidden_engine: bool) {
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
         "--disable-background-timer-throttling \
          --disable-renderer-backgrounding \
-         --disable-backgrounding-occluded-windows",
+         --disable-backgrounding-occluded-windows \
+         --disable-crash-reporter",
     );
 }
 

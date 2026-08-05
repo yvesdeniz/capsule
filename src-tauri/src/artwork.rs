@@ -23,9 +23,6 @@ fn cache_dir(app_data: Option<PathBuf>) -> Option<PathBuf> {
     Some(app_data?.join("artwork"))
 }
 
-/// Navidrome cover references are stored as `subsonic:<coverArtId>` rather than
-/// a URL, because fetching one needs auth and an authenticated URL in SQLite
-/// would break the promise that the database is safe to paste into a bug report.
 pub fn is_subsonic_ref(template: &str) -> bool {
     template.starts_with(crate::subsonic::ARTWORK_PREFIX)
 }
@@ -35,8 +32,6 @@ pub fn subsonic_id(template: &str) -> Option<&str> {
 }
 
 pub fn resolve_template(template: &str, size: u32) -> String {
-    // Subsonic refs are not URLs and must not be mangled into one; the signed
-    // URL is built at fetch time, where credentials are available.
     if is_subsonic_ref(template) || template.starts_with(crate::local::ARTWORK_PREFIX) {
         return template.to_string();
     }
@@ -159,10 +154,6 @@ pub fn cache_path(dir: &Path, template: &str, size: u32) -> PathBuf {
     dir.join(format!("{}-{}.img", cache_key(template), size))
 }
 
-/// The active Navidrome client, when that source is live.
-///
-/// Passed into [`ensure_cached`] rather than read inside it so the fetch path
-/// stays independent of Tauri state and remains testable.
 pub fn signer(app: &AppHandle) -> Option<std::sync::Arc<crate::subsonic::Client>> {
     app.state::<AppState>().navidrome.lock().expect("navidrome mutex").clone()
 }
@@ -173,15 +164,12 @@ pub async fn ensure_cached(
     size: u32,
     signer: Option<&crate::subsonic::Client>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    // Keyed on the stored template, never on the signed URL: a fresh salt per
-    // request must not invalidate every cached cover.
+
     let path = cache_path(dir, template, size);
     if let Ok(bytes) = tokio::fs::read(&path).await {
         return Ok(bytes);
     }
 
-    // A local track carries its cover inside the file, so there is nothing to
-    // fetch: read it, cache it under the same key, done.
     if let Some(file) = template.strip_prefix(crate::local::ARTWORK_PREFIX) {
         let file = std::path::PathBuf::from(file);
         let bytes = tokio::task::spawn_blocking(move || crate::local::embedded_picture(&file))
@@ -206,8 +194,7 @@ pub async fn ensure_cached(
         }
         None => resolve_template(template, size),
     };
-    // The error is rebuilt without the URL on purpose: a Subsonic cover URL
-    // carries the account's signed token, and this failure gets logged.
+
     let resp = reqwest::get(&url).await.map_err(|e| {
         let what = if e.is_timeout() { "timed out" } else { "could not be fetched" };
         format!("artwork {what}")
@@ -242,8 +229,6 @@ pub async fn prefetch(app: tauri::AppHandle, size: u32) {
         }
     };
 
-    // Resolved once: Subsonic covers need a signed URL, and the client is
-    // stable for the life of the prefetch.
     let nd = signer(&app);
 
     let total = art.len();

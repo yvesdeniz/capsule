@@ -1,11 +1,3 @@
-//! Last.fm: cover-art lookup for Discord Rich Presence, and scrobbling.
-//!
-//! Scrobbling here is direct, signed with our own session key, so it covers
-//! every source. Navidrome can also forward plays from the server side; the
-//! caller picks one of the two rather than sending both.
-//!
-//! Art lookup returns `None` on every failure. Presence without art beats no
-//! presence.
 
 use serde::Deserialize;
 
@@ -30,10 +22,6 @@ struct Image {
     size: String,
 }
 
-/// The largest usable image from Last.fm's size-ordered list.
-///
-/// Last.fm returns entries with empty URLs for sizes it lacks, so picking by
-/// position rather than by content yields a blank image about as often as not.
 fn best_image(images: Vec<Image>) -> Option<String> {
     for want in ["extralarge", "large", "medium"] {
         if let Some(i) = images.iter().find(|i| i.size == want && !i.url.trim().is_empty()) {
@@ -258,8 +246,6 @@ pub async fn scrobble(
     Ok(())
 }
 
-/// Last.fm's own rule: a play counts once it passes halfway or four minutes,
-/// whichever comes first, and tracks under 30 seconds never count.
 pub fn scrobble_due(position_ms: u64, duration_ms: u64) -> bool {
     const MIN_TRACK_MS: u64 = 30_000;
     const ALWAYS_AT_MS: u64 = 4 * 60 * 1000;
@@ -269,7 +255,6 @@ pub fn scrobble_due(position_ms: u64, duration_ms: u64) -> bool {
     position_ms >= (duration_ms / 2).min(ALWAYS_AT_MS)
 }
 
-/// When the track being scrobbled started, in unix seconds.
 pub fn started_at(now_unix: u64, position_ms: u64) -> u64 {
     now_unix.saturating_sub(position_ms / 1000)
 }
@@ -332,7 +317,6 @@ mod tests {
 
     #[test]
     fn a_track_of_unknown_length_never_counts() {
-        // duration 0 means we never learned it; guessing would invent plays.
         assert!(!scrobble_due(500_000, 0));
     }
 
