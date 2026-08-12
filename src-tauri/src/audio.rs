@@ -21,12 +21,10 @@ pub enum AudioError {
     Io(#[from] std::io::Error),
 }
 
-/// rodio takes gain as 0.0..=1.0; the UI speaks percent.
 fn to_gain(percent: u8) -> f32 {
     (percent.min(100) as f32) / 100.0
 }
 
-/// Clears a flag however the scope exits, including on an early return.
 struct ClearOnDrop(Arc<AtomicBool>);
 
 impl Drop for ClearOnDrop {
@@ -36,20 +34,11 @@ impl Drop for ClearOnDrop {
 }
 
 pub struct Engine {
-    // Held for its lifetime: dropping the stream silences the sink.
     _stream: rodio::OutputStream,
-    // Arc so the decode-setup thread can hold it; rodio's Sink is not Clone.
     sink: Arc<rodio::Sink>,
     current: Mutex<Option<Shared>>,
-    /// True between `load` being called and the decoder reaching the sink,
-    /// so the position ticker doesn't mistake the momentarily-empty sink for
-    /// end-of-track.
     loading: Arc<AtomicBool>,
-    /// A seek that arrived while the track was still being set up.
     pending_seek: Arc<Mutex<Option<u64>>>,
-    /// Bumped on every `load`. A decode thread checks it before touching the
-    /// sink: without it, a superseded load could append its track after a
-    /// newer one was already requested, or steal the newer track's seek.
     generation: Arc<AtomicU64>,
 }
 
@@ -68,19 +57,11 @@ impl Engine {
         })
     }
 
-    /// `Decoder::new` blocks until the first bytes arrive, so it runs on its
-    /// own thread rather than the IPC command thread.
-    ///
-    /// A decode failure is reported through the shared state, so the position
-    /// ticker turns it into `playback://error` on the one existing path.
     pub fn load(&self, url: String, cache: PathBuf) -> Result<(), AudioError> {
         self.sink.stop();
-        // Kept so a seek outside the buffer can restart the transfer.
         let url_for_seek = url.clone();
 
         let shared: Shared = Arc::new((Mutex::new(CacheState::new()), Condvar::new()));
-        // Cache file is created synchronously so the reader can open it
-        // immediately; only the transfer is asynchronous.
         let cancel = stream::Cancel::default();
         stream::spawn_fetch(url, cache.clone(), shared.clone(), 0, cancel.clone())?;
         *self.current.lock().expect("current mutex") = Some(shared.clone());
@@ -110,8 +91,6 @@ impl Engine {
             }
             match rodio::Decoder::new(source) {
                 Ok(d) => {
-                    // A newer load may have started while this one was probing
-                    // the stream; appending now would play the wrong track.
                     if !current() {
                         return;
                     }
@@ -138,11 +117,6 @@ impl Engine {
         Ok(())
     }
 
-    /// Play a file straight from disk.
-    ///
-    /// Local files need none of the streaming machinery: no fetch, no cache, no
-    /// ranged refetch on seek. The decode still runs off the command thread,
-    /// because probing a large FLAC is not instant.
     pub fn load_file(&self, path: PathBuf) -> Result<(), AudioError> {
         self.sink.stop();
         *self.current.lock().expect("current mutex") = None;
