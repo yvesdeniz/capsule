@@ -6,10 +6,12 @@ import {
   navidrome as navidromeIpc,
   on,
   settings as settingsIpc,
+  themes as themesIpc,
   type LastfmStatus,
   type NavidromeStatus,
   type Settings,
   type Source,
+  type ThemeSummary,
 } from '../lib/ipc'
 import { isInsecureUrl } from '../lib/navidrome'
 import { credentialStore } from '../lib/platform'
@@ -168,7 +170,9 @@ export function Cards<T extends string>({
           key={o.id}
           onClick={() => onChange(o.id)}
           className={`rounded border px-3.5 py-3 text-left transition-colors ${
-            value === o.id ? 'border-accent bg-accent/8' : 'border-rule hover:border-muted'
+            value === o.id
+              ? 'card-on border-accent bg-accent/8'
+              : 'border-rule hover:border-muted'
           }`}
         >
           <span className="flex items-center gap-2 text-[13px] text-ink">
@@ -348,6 +352,53 @@ export function SourceSetup({
 
   return (
     <Folders folders={draft.local.folders} onChange={(folders) => edit({ local: { folders } })} />
+  )
+}
+
+export function ThemePicker({
+  draft,
+  edit,
+}: {
+  draft: Settings
+  edit: (patch: Partial<Settings>) => void
+}) {
+  const [all, setAll] = useState<ThemeSummary[]>([])
+
+  useEffect(() => {
+    void themesIpc.list().then(setAll)
+  }, [])
+
+  const active = all.find((t) => t.id === draft.appearance.theme)
+
+  if (all.length === 0) return null
+
+  return (
+    <div className="space-y-3">
+      <Cards
+        options={all.map((t) => ({
+          id: t.id,
+          name: t.name,
+          blurb: t.builtin ? t.polarity : `${t.polarity} · yours`,
+        }))}
+        value={draft.appearance.theme}
+        onChange={(theme) => edit({ appearance: { ...draft.appearance, theme } })}
+      />
+      {active && active.failures.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[11px] leading-5 text-warn">
+            {active.failures.length} colour pair
+            {active.failures.length === 1 ? '' : 's'} below AA (4.5:1)
+          </p>
+          <ul className="space-y-0.5">
+            {active.failures.map((f) => (
+              <li key={`${f.fg}-${f.bg}`} className="label text-muted">
+                {f.fg} on {f.bg} — {f.ratio.toFixed(2)}:1
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   )
 }
 

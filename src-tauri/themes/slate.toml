@@ -1,0 +1,5 @@
+name   = "Slate"
+ground = "#0e1113"
+panel  = "#171b1e"
+ink    = "#ced4d8"
+accent = "#7fa8c9"

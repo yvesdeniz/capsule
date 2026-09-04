@@ -1,7 +1,9 @@
 {
   "identifier": "main-ui",
   "description": "Permissions for our own React UI window (local origin)",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -41,6 +43,7 @@
     "allow-lyrics-for",
     "allow-settings-get",
     "allow-settings-set",
+    "allow-themes-list",
     "allow-play-songs",
     "allow-play-album",
     "allow-play-playlist"

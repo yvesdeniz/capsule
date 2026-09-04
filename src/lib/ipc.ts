@@ -24,7 +24,7 @@ export interface Settings {
   source: Source
   onboarded: boolean
   developer: boolean
-  appearance: { glass: string }
+  appearance: { glass: string; theme: string }
   navidrome: { url: string; username: string }
   local: { folders: string[] }
   lyrics: { offset_ms: number }
@@ -35,6 +35,24 @@ export interface Settings {
 export const settings = {
   get: () => invoke<Settings>('settings_get'),
   set: (next: Settings) => invoke<void>('settings_set', { settings: next }),
+}
+
+export interface ThemeFailure {
+  fg: string
+  bg: string
+  ratio: number
+}
+
+export interface ThemeSummary {
+  id: string
+  name: string
+  polarity: 'light' | 'dark'
+  builtin: boolean
+  failures: ThemeFailure[]
+}
+
+export const themes = {
+  list: () => invoke<ThemeSummary[]>('themes_list'),
 }
 
 export interface LyricLine {
@@ -193,6 +211,7 @@ type Events = {
   'playback://error': string
   'lastfm://linked': LastfmStatus
   'lastfm://failed': string
+  'theme://changed': string
 }
 
 export function on<K extends keyof Events>(

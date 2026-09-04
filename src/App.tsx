@@ -141,6 +141,9 @@ export default function App() {
         setProblem(`Playback engine unavailable (${reason}). Apple may have changed their player.`)
       }),
       on('playback://error', (reason) => setProblem(`Playback failed: ${reason}`)),
+      on('theme://changed', (css) => {
+        document.documentElement.style.cssText = css
+      }),
     ]
     return () => {
       for (const s of subs) void s.then((un) => un())

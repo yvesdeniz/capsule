@@ -23,6 +23,7 @@ pub mod snap;
 #[cfg(target_os = "windows")]
 pub mod thumbbar;
 pub mod sync;
+pub mod theme;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,6 +54,7 @@ pub struct AppState {
     pub login_prompted: AtomicBool,
     pub engine_ready: AtomicBool,
     pub media_controls: media_controls::Handle,
+    pub theme: Mutex<theme::Theme>,
 }
 
 impl AppState {
@@ -73,6 +75,7 @@ impl AppState {
             login_prompted: AtomicBool::new(false),
             engine_ready: AtomicBool::new(false),
             media_controls: media_controls::Handle::default(),
+            theme: Mutex::new(theme::resolve(&theme::presets(), theme::DEFAULT_THEME_ID)),
         }
     }
 }
@@ -124,6 +127,9 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
+    let theme = app.state::<AppState>().theme.lock().expect("theme mutex").clone();
+    let css = theme.css();
+
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
         .title("capsule")
@@ -135,9 +141,11 @@ fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
         .initialization_script(format!(
             r#"(function () {{
                 var v = {};
+                var css = {};
                 function set() {{
                     if (document.documentElement) {{
                         document.documentElement.dataset.glass = v;
+                        document.documentElement.style.cssText = css;
                         return true;
                     }}
                     return false;
@@ -146,7 +154,8 @@ fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
                     document.addEventListener('DOMContentLoaded', set);
                 }}
             }})();"#,
-            serde_json::to_string(glass).unwrap_or_else(|_| "\"none\"".into())
+            serde_json::to_string(glass).unwrap_or_else(|_| "\"none\"".into()),
+            serde_json::to_string(&css).unwrap_or_else(|_| "\"\"".into())
         ))
         .build()?;
 
@@ -189,11 +198,12 @@ fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
     #[cfg(target_os = "windows")]
     {
         use window_vibrancy::{apply_acrylic, apply_mica};
+        let g = theme.ground;
         let applied = match glass {
             "acrylic-chrome" | "acrylic-all" => {
-                apply_acrylic(&main, Some((13, 16, 20, 24))).map(|_| "acrylic")
+                apply_acrylic(&main, Some((g.r, g.g, g.b, 24))).map(|_| "acrylic")
             }
-            "mica" => apply_mica(&main, Some(true)).map(|_| "mica"),
+            "mica" => apply_mica(&main, Some(theme.is_dark())).map(|_| "mica"),
             _ => Ok("none"),
         };
         match applied {
@@ -277,6 +287,7 @@ pub fn run() {
             commands::lyrics_for,
             commands::settings_get,
             commands::settings_set,
+            commands::themes_list,
             commands::play_songs,
             commands::play_album,
             commands::play_playlist,
@@ -345,6 +356,14 @@ pub fn run() {
                 }
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "could not read last.fm session"),
+            }
+
+            {
+                let state = app.state::<AppState>();
+                let dir = state.data_dir.lock().expect("data dir mutex").clone();
+                let id = state.settings.lock().expect("settings mutex").appearance.theme.clone();
+                let all = theme::load_all(dir.as_deref());
+                *state.theme.lock().expect("theme mutex") = theme::resolve(&all, &id);
             }
 
             let glass = std::env::var("CAPSULE_GLASS").unwrap_or_else(|_| {

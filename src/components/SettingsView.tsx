@@ -10,6 +10,7 @@ import {
   SOURCES,
   SourceSetup,
   Switch,
+  ThemePicker,
 } from './fields'
 
 /**
@@ -50,12 +51,15 @@ export function SettingsView() {
           </div>
         </Section>
 
-        <Section title="Appearance" sub="Takes effect on the next launch.">
-          <Cards
-            options={GLASS}
-            value={draft.appearance.glass}
-            onChange={(glass) => edit({ appearance: { glass } })}
-          />
+        <Section title="Appearance" sub="Themes apply now; glass takes effect on the next launch.">
+          <ThemePicker draft={draft} edit={edit} />
+          <div className="mt-4">
+            <Cards
+              options={GLASS}
+              value={draft.appearance.glass}
+              onChange={(glass) => edit({ appearance: { ...draft.appearance, glass } })}
+            />
+          </div>
         </Section>
 
         <Section

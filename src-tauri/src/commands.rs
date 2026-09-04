@@ -570,10 +570,22 @@ pub fn settings_set(
         return Err("no data directory; settings cannot be saved".into());
     };
 
-    let previous = state.settings.lock().expect("settings mutex").source;
+    let (previous, previous_theme) = {
+        let s = state.settings.lock().expect("settings mutex");
+        (s.source, s.appearance.theme.clone())
+    };
     crate::settings::save(&dir, &settings).map_err(|e| e.to_string())?;
     let source = settings.source;
+    let theme_id = settings.appearance.theme.clone();
     *state.settings.lock().expect("settings mutex") = settings;
+
+    if theme_id != previous_theme {
+        let all = crate::theme::load_all(Some(&dir));
+        let resolved = crate::theme::resolve(&all, &theme_id);
+        let css = resolved.css();
+        *state.theme.lock().expect("theme mutex") = resolved;
+        let _ = app.emit("theme://changed", css);
+    }
 
     if source != previous {
         use_database_for(&app, source)?;
@@ -581,6 +593,43 @@ pub fn settings_set(
         let _ = app.emit("library://updated", sync::counts(&app));
     }
     Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ThemeSummary {
+    pub id: String,
+    pub name: String,
+    pub polarity: crate::theme::Polarity,
+    pub builtin: bool,
+    pub failures: Vec<crate::theme::Failure>,
+}
+
+#[tauri::command]
+pub fn themes_list(state: State<'_, AppState>) -> Vec<ThemeSummary> {
+    let dir = state.data_dir.lock().expect("data dir mutex").clone();
+    let on_disk: HashSet<String> = dir
+        .as_deref()
+        .map(crate::theme::themes_dir)
+        .and_then(|d| std::fs::read_dir(d).ok())
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
+                .filter_map(|e| e.path().file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    crate::theme::load_all(dir.as_deref())
+        .into_iter()
+        .map(|t| ThemeSummary {
+            builtin: !on_disk.contains(&t.id),
+            failures: t.failures(),
+            id: t.id,
+            name: t.name,
+            polarity: t.polarity,
+        })
+        .collect()
 }
 
 #[derive(Debug, serde::Serialize)]

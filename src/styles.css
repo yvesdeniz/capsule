@@ -61,6 +61,7 @@ body,
   /* The catch of light along a raised glass edge. Off in solid mode, where
      there is no depth to catch it. */
   --glass-edge: none;
+  --edge-tint: 255, 255, 255;
   --radius-surface: 10px;
   --radius-row: 6px;
 }
@@ -73,7 +74,7 @@ body,
   --surface-panel: color-mix(in srgb, var(--color-panel) 72%, transparent);
   --list-opacity: 78%;
   --surface-well: color-mix(in srgb, var(--color-ground) var(--list-opacity), transparent);
-  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+  --glass-edge: inset 0 1px 0 rgba(var(--edge-tint), 0.055);
 }
 
 /* Windows 11 Mica tints the whole window subtly from the wallpaper. */
@@ -81,7 +82,7 @@ body,
   --surface-ground: transparent;
   --surface-panel: color-mix(in srgb, var(--color-panel) 60%, transparent);
   --surface-well: color-mix(in srgb, var(--color-ground) 58%, transparent);
-  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --glass-edge: inset 0 1px 0 rgba(var(--edge-tint), 0.05);
 }
 
 /* Glass everywhere, including the track list. */
@@ -89,7 +90,7 @@ body,
   --surface-ground: transparent;
   --surface-panel: color-mix(in srgb, var(--color-panel) 55%, transparent);
   --surface-well: color-mix(in srgb, var(--color-ground) 46%, transparent);
-  --glass-edge: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --glass-edge: inset 0 1px 0 rgba(var(--edge-tint), 0.06);
 }
 
 .content-surface {
@@ -117,6 +118,7 @@ body,
 }
 /* Raised surfaces lift the background under dim text, so dim text lifts too. */
 .row[data-playing='true'] .text-muted,
+.card-on .text-muted,
 .tab-on .text-muted {
   color: var(--color-muted2);
 }
@@ -170,7 +172,7 @@ input[type='search'] {
   background: var(--color-rule);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #333d49;
+  background: color-mix(in srgb, var(--color-rule) 80%, var(--color-ink));
 }
 
 

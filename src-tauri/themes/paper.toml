@@ -1,0 +1,5 @@
+name   = "Paper"
+ground = "#f4f2ee"
+panel  = "#eae7e1"
+ink    = "#2a2724"
+accent = "#5a4b8a"

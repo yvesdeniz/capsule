@@ -76,11 +76,12 @@ pub struct Discord {
 #[serde(default)]
 pub struct Appearance {
     pub glass: String,
+    pub theme: String,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
-        Self { glass: "none".into() }
+        Self { glass: "none".into(), theme: crate::theme::DEFAULT_THEME_ID.into() }
     }
 }
 
@@ -249,6 +250,29 @@ mod tests {
             ..Settings::default()
         };
         assert!(both.lastfm_enabled());
+    }
+
+    #[test]
+    fn appearance_defaults_to_the_capsule_theme() {
+        assert_eq!(Settings::default().appearance.theme, "capsule");
+    }
+
+    #[test]
+    fn a_file_without_a_theme_key_keeps_the_default() {
+        let dir = tmp("no-theme");
+        std::fs::write(path(&dir), "source = \"local\"\n").unwrap();
+        assert_eq!(load(&dir).appearance.theme, "capsule");
+    }
+
+    #[test]
+    fn theme_round_trips_through_disk() {
+        let dir = tmp("theme-roundtrip");
+        let s = Settings {
+            appearance: Appearance { glass: "mica".into(), theme: "paper".into() },
+            ..Settings::default()
+        };
+        save(&dir, &s).unwrap();
+        assert_eq!(load(&dir).appearance.theme, "paper");
     }
 
     #[test]
